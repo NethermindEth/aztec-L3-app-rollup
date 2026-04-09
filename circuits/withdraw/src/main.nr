@@ -1,0 +1,100 @@
+use l3_types::{
+    Note, IndexedLeaf, TREE_DEPTH, MAX_NOTES_PER_TX, MAX_OUTPUTS_PER_TX,
+    hash_pubkey, compute_nullifier, compute_state_root, derive_pubkey,
+    verify_merkle_membership, verify_nullifier_non_membership,
+    poseidon2_hash,
+};
+
+// Withdraw circuit: consumes up to 2 L3 notes and produces an L2 claim
+// hash plus an optional change note.
+//
+// Public inputs (5 fields, matching batch_app layout):
+//   [nullifier_0, nullifier_1, l2_claim_hash, change_note_hash, state_root]
+fn main(
+    // --- private inputs ---
+    owner_secret: Field,
+    l3_notes: [Note; MAX_NOTES_PER_TX],
+    l3_note_indices: [Field; MAX_NOTES_PER_TX],
+    l3_note_siblings: [[Field; TREE_DEPTH]; MAX_NOTES_PER_TX],
+    // Indexed nullifier tree witnesses.
+    low_leaves: [IndexedLeaf; MAX_NOTES_PER_TX],
+    low_leaf_indices: [Field; MAX_NOTES_PER_TX],
+    low_leaf_siblings: [[Field; TREE_DEPTH]; MAX_NOTES_PER_TX],
+    active_inputs: [u1; MAX_NOTES_PER_TX],
+    l2_token_address: Field,
+    l2_recipient_address: Field,
+    claim_salt: Field,
+    withdraw_amount: Field,
+    change_salt: Field,
+    note_hash_tree_root: Field,
+    nullifier_tree_root: Field,
+    // --- public inputs ---
+    nullifiers: pub [Field; MAX_NOTES_PER_TX],
+    note_hashes: pub [Field; MAX_OUTPUTS_PER_TX],
+    state_root: pub Field,
+) {
+    // State root binds this proof to a specific L3 state.
+    assert(
+        compute_state_root(nullifier_tree_root, note_hash_tree_root) == state_root,
+        "state root mismatch",
+    );
+
+    assert(active_inputs[0] == 1, "first input must be active");
+
+    let owner_pubkey = derive_pubkey(owner_secret);
+    let owner_pubkey_hash = hash_pubkey(owner_pubkey.x, owner_pubkey.y);
+    let token_id = l3_notes[0].token_id;
+
+    // token_id IS the L2 token address.
+    assert(token_id == l2_token_address, "token_id must match l2 token address");
+
+    let mut total_input: Field = 0;
+
+    for i in 0..MAX_NOTES_PER_TX {
+        if active_inputs[i] == 1 {
+            assert(l3_notes[i].owner_pubkey_hash == owner_pubkey_hash);
+            assert(l3_notes[i].token_id == token_id);
+            verify_merkle_membership(
+                l3_notes[i].hash(),
+                l3_note_indices[i],
+                l3_note_siblings[i],
+                note_hash_tree_root,
+            );
+            assert(compute_nullifier(owner_secret, l3_notes[i].salt) == nullifiers[i]);
+            // Nullifier does NOT exist in the indexed nullifier tree.
+            verify_nullifier_non_membership(
+                nullifiers[i],
+                low_leaves[i],
+                low_leaf_indices[i],
+                low_leaf_siblings[i],
+                nullifier_tree_root,
+            );
+            total_input += l3_notes[i].amount;
+        } else {
+            assert(nullifiers[i] == 0, "inactive input must have zero nullifier");
+        }
+    }
+
+    // --- Conservation ---
+    let change_amount = total_input - withdraw_amount;
+    let _ = withdraw_amount as u64;
+    let _ = change_amount as u64;
+
+    // Output 0: L2 claim hash.
+    let secret = poseidon2_hash([l2_recipient_address, claim_salt]);
+    let claim_hash = poseidon2_hash([l2_token_address, withdraw_amount, secret]);
+    assert(claim_hash == note_hashes[0], "claim hash mismatch");
+
+    // Output 1: change L3 note (zero if exact spend).
+    if change_amount != 0 {
+        let change_note = Note {
+            owner_pubkey_hash,
+            amount: change_amount,
+            token_id,
+            salt: change_salt,
+        };
+        assert(change_note.hash() == note_hashes[1]);
+    } else {
+        assert(note_hashes[1] == 0, "no-change output must be zero");
+    }
+}

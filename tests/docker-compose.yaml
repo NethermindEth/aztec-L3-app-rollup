@@ -1,0 +1,27 @@
+services:
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:v1.4.1
+    entrypoint: ["anvil"]
+    command: ["--host", "0.0.0.0", "--silent"]
+    ports:
+      - "8545:8545"
+    healthcheck:
+      test: ["CMD", "cast", "bn", "--rpc-url", "http://localhost:8545"]
+      interval: 1s
+      timeout: 5s
+      retries: 24
+
+  aztec:
+    image: aztecprotocol/aztec:4.2.0-nightly.20260408
+    command: ["start", "--local-network"]
+    ports:
+      - "8080:8080"
+    environment:
+      ETHEREUM_HOSTS: http://anvil:8545
+      L1_CHAIN_ID: 31337
+      TEST_ACCOUNTS: "true"
+      LOG_LEVEL: "info"
+      DEPLOY_AZTEC_CONTRACTS_SALT: 1
+    depends_on:
+      anvil:
+        condition: service_healthy

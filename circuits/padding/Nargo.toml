@@ -1,0 +1,8 @@
+[package]
+name = "l3_padding"
+type = "bin"
+authors = []
+compiler_version = ">=0.25.0"
+
+[dependencies]
+l3_types = { path = "../types" }

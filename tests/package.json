@@ -1,0 +1,26 @@
+{
+  "name": "l3-payments-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sandbox:up": "docker compose up -d && echo 'Waiting for sandbox...' && sleep 30",
+    "sandbox:down": "docker compose down -v",
+    "smoke": "npx tsx step4-full-lifecycle.ts",
+    "step0": "npx tsx step0-private-tokens.ts",
+    "step1": "npx tsx step1-real-deposit.ts",
+    "step2": "npx tsx step2-submit-batch-probe.ts",
+    "step3": "npx tsx step3-submit-batch-valid.ts",
+    "e2e": "npx tsx step4-full-lifecycle.ts"
+  },
+  "dependencies": {
+    "@aztec/accounts": "4.2.0-nightly.20260408",
+    "@aztec/aztec.js": "4.2.0-nightly.20260408",
+    "@aztec/bb.js": "4.2.0-nightly.20260408",
+    "@aztec/noir-contracts.js": "4.2.0-nightly.20260408",
+    "@aztec/noir-noir_js": "4.2.0-nightly.20260408",
+    "@aztec/stdlib": "4.2.0-nightly.20260408",
+    "@aztec/wallets": "4.2.0-nightly.20260408",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

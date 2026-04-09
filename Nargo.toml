@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "circuits/types",
+    "circuits/payment",
+    "circuits/deposit",
+    "circuits/withdraw",
+    "circuits/batch_app",
+    "circuits/init_kernel",
+    "circuits/tail_kernel",
+    "circuits/hiding_kernel",
+    "circuits/tube",
+    "circuits/padding",
+    "contract",
+]
