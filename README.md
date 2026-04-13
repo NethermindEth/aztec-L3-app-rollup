@@ -273,4 +273,5 @@ tests/
 ## Further reading
 
 - [`BATCHING_OF_BATCHES.md`](./BATCHING_OF_BATCHES.md) — two ways to settle 16 slot capacity in one L2 tx: IVC meta-batch vs recursive merged-proof, with architecture, reproduction, and side-by-side cost comparison.
+- [`BATCHING_SCALING.md`](./BATCHING_SCALING.md) — extrapolation to 32-slot and 128-slot targets. Three approaches (A: IVC meta-batch, B1: small sub-batches + quad aggregator, B2: binary pair_wrapper tree), with DA / mana / RAM tradeoffs and implementation roadmaps.
 - [`DESIGN_DECISIONS.md`](./DESIGN_DECISIONS.md) — DA minimization, the single-batch IVC vs recursive decision, sizing rationale.
