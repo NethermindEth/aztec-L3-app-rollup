@@ -1,50 +1,68 @@
 # Batching-of-Batches on Aztec L3
 
-> Two ways to settle multiple L3 state transitions in one L2 transaction, with measurements.
+> Two ways to settle **16 L3 transactions in one L2 transaction**, with side-by-side measurements.
 
-This doc explains two proof designs that let a single Aztec L2 transaction commit to more L3 activity than a single batch proof would cover. Both ship as end-to-end tests (`step8-*` and `step9-*`) that you can run yourself to reproduce the measurements in the table below.
+Both paths in this repo handle the **same total capacity per L2 tx: 16 L3 tx slots** (processed as 2 independent sub-batches of 8). They differ in how the two sub-batches are combined into a single L2 submission:
+
+- **Design A — IVC meta-batch** sends **two proofs** in one L2 tx (no aggregation).
+- **Design B — Recursive merged-proof** aggregates both sub-batches into **one proof** via a new `pair_wrapper` circuit, then sends that.
+
+Both designs ship as end-to-end tests you can run yourself (`step8-*` and `step9-*`) to reproduce the measurements.
 
 ---
 
-## TL;DR
-
-Two ways to settle 16 L3 slots (two sub-batches of 8) in **one L2 tx**:
+## At a glance
 
 | | **Design A — IVC meta-batch** | **Design B — Recursive merged-proof** |
 |---|---|---|
-| How it works | L2 tx carries **two independent** tube proofs (one per sub-batch). Contract verifies both and settles twice in the same tx. | A new `pair_wrapper` circuit recursively verifies both wrapper proofs and produces **one** merged UltraHonk proof. Contract verifies once and settles once. |
-| Proofs on L2 | 2 × 16,608 bytes | 1 × 16,608 bytes |
-| Nonce advance | +2 | +1 |
-| DA (calldata args) | **40,512 bytes** | **23,648 bytes** |
-| Client proving (concurrent) | ≈ 2.6 min | ≈ 5.2 min (needs >16 GiB RAM) / 10.7 min (sequential, fits 16 GiB) |
-| Private kernel verify cost | 2 × `verify_honk_proof` | 1 × `verify_honk_proof` |
-| Public execution | 2 × `settle_batch` @ batch=8 | 1 × `settle_batch_merged` @ batch=16 |
+| **Total L3 tx capacity per L2 tx** | **16 slots** | **16 slots** |
+| Sub-batches per L2 tx | **2** | **2** |
+| Sub-batch size (per proof) | **8 slots** | **8 slots** |
+| Proofs on the L2 tx | **2** × UltraHonk (16,608 B each) | **1** × UltraHonk (16,608 B) — aggregated |
+| How the sub-batches combine | `submit_two_batches` verifies both proofs; enqueues 2 `settle_batch` calls | `pair_wrapper` recursively verifies both wrappers → 1 merged proof; 1 `settle_batch_merged` call |
+| Nonce advance per L2 tx | +2 | +1 |
+| L2 function-arg DA | 40,512 bytes | 23,648 bytes (**-42%**) |
+| Client proving wall-clock | **2.6 min** (2 sub-batches concurrent) | **10.7 min** seq / ≈ 5.2 min conc. with ≥24 GiB RAM |
+| Private-circuit verify cost | 2 × `verify_honk_proof` | 1 × `verify_honk_proof` |
+| Public execution | 2 × `settle_batch` at batch=8 (8+8 deposit/withdrawal slots each) | 1 × `settle_batch_merged` at batch=16 (16 deposit/withdrawal slots) |
 | New circuits needed | 0 | 1 (`pair_wrapper`) |
-| On-chain proof size (invariant) | 16,608 bytes | 16,608 bytes |
+| Aztec contract changes | Add `submit_two_batches` method | Add `submit_merged_batch` + `settle_batch_merged` + `merged_vk_hash` storage |
 
-**Rule of thumb**: meta-batch is simpler and faster to prove; merged-proof is smaller DA and cheaper kernel verify at the cost of an extra aggregator prove.
+**Same total throughput, different trade-offs**: Design A is faster to prove; Design B has smaller DA and cheaper on-L2 verification, at the cost of an extra aggregator prove.
 
 ---
 
-## The two designs
+## Glossary — what the numbers mean
 
-### Design A — IVC meta-batch
+To avoid confusion, here's what each quantity counts:
 
-Two independent IVC pipelines produce two tube proofs. The L3 contract's `submit_two_batches` method verifies both proofs in the same private-function invocation and enqueues two sequential `settle_batch` public calls.
+- **L3 tx** — one of {deposit, payment, withdraw}. A single user-level action.
+- **L3 tx slot** — a fixed position inside a batch proof. Each sub-batch proof has exactly 8 slots. Real slots contain one tx's proof; remaining slots are filled with a padding proof. In these tests the harness supports only **1 real tx per sub-batch** (+ 7 padding); the circuits support more (see *Caveats* below).
+- **Sub-batch** — one independent batch proof. Each sub-batch covers up to 8 L3 tx slots. `batch_app` (IVC) and `batch_app_standalone` (recursive) are both compiled at `MAX_BATCH_SIZE = 8`.
+- **L2 tx** — one Aztec transaction submitted to the sandbox. Both designs bundle **2 sub-batches into 1 L2 tx**, giving 16 L3 tx slots of capacity per L2 tx.
+- **Slot capacity** vs **real txs**: this repo's tests always exercise 16 slots but ship only 2 real txs + 14 padding (see *Caveats*). When we say "handle 16 tx", we mean 16 *slots* of capacity.
+
+---
+
+## Design A — IVC meta-batch
+
+Two independent IVC pipelines produce two tube proofs. The L3 contract's `submit_two_batches` method verifies both proofs in one private-function invocation and enqueues two sequential `settle_batch` public calls.
 
 ```
                                                                          ┌─ tube proof₁ ──┐
-sub-batch 1 ──► batch_app ──► IVC kernels ──► Chonk ──► tube ───────────►│                │
-(8 tx slots)                                                             │                │    ┌─ settle_batch (batch=8)
-                                                                         │ submit_two_    ├───►│
-                                                                         │  batches       │    └─ settle_batch (batch=8)
+sub-batch 1 (8 slots) ──► batch_app ──► IVC kernels ──► Chonk ──► tube ──►                │
+                                                                         │                │    ┌─► settle_batch (batch=8)
+                                                                         │ submit_two_    ├────┤
+                                                                         │  batches       │    └─► settle_batch (batch=8)
                                                                          │ (L3 contract)  │
-sub-batch 2 ──► batch_app ──► IVC kernels ──► Chonk ──► tube ───────────►│                │    Aztec L2 tx (one)
-(8 tx slots)                                                             │                │    nonce += 2
+sub-batch 2 (8 slots) ──► batch_app ──► IVC kernels ──► Chonk ──► tube ──►                │    One Aztec L2 tx
+                                                                         │                │    nonce += 2
                                                                          └─ tube proof₂ ──┘
 ```
 
-**Circuits**: per-tx × 8, `batch_app`, `init_kernel`, `tail_kernel`, `hiding_kernel`, Chonk (via `AztecClientBackend`), `tube`. Same set as single-batch IVC — just run twice in parallel.
+**Total capacity per L2 tx**: **16 L3 tx slots** (= 2 sub-batches × 8 slots each).
+
+**Circuits**: per-tx × 8 per sub-batch (× 2 sub-batches = 16 per-tx proofs total), `batch_app`, `init_kernel`, `tail_kernel`, `hiding_kernel`, Chonk (via `AztecClientBackend`), `tube`. Run once per sub-batch.
 
 **Contract method** (`contract_ivc/src/main.nr`):
 ```noir
@@ -53,35 +71,38 @@ fn submit_two_batches(
     tube_proof_1, public_inputs_1, nullifiers_1, note_hashes_1, deposits_1, withdrawals_1,
     tube_proof_2, public_inputs_2, nullifiers_2, note_hashes_2, deposits_2, withdrawals_2,
 ) {
-    assert(tube_vk_hash == self.storage.tube_vk_hash.read(), "...");
+    assert(tube_vk_hash == self.storage.tube_vk_hash.read(), "...");  // bind to committed VK
     verify_honk_proof(tube_vk, tube_proof_1, public_inputs_1, tube_vk_hash);
     verify_honk_proof(tube_vk, tube_proof_2, public_inputs_2, tube_vk_hash);
-    assert(public_inputs_1[1] == public_inputs_2[0], "state chain");
+    assert(public_inputs_1[1] == public_inputs_2[0], "state chain");   // B.old == A.new
     // ... tree index chain checks ...
-    self.enqueue_self.settle_batch(...batch 1...);
-    self.enqueue_self.settle_batch(...batch 2...);
+    self.enqueue_self.settle_batch(...sub-batch 1 data (batch=8 arrays)...);
+    self.enqueue_self.settle_batch(...sub-batch 2 data (batch=8 arrays)...);
 }
 ```
 
 Two `verify_honk_proof` calls in the private circuit. Two `settle_batch` public calls in the same L2 tx.
 
-### Design B — Recursive merged-proof
+---
 
-Two independent recursive pipelines produce two wrapper proofs. A new `pair_wrapper` circuit recursively verifies both and emits one merged UltraHonk proof, which the L3 contract's `submit_merged_batch` verifies once and settles via `settle_batch_merged` with batch=16 arrays.
+## Design B — Recursive merged-proof
+
+Two independent recursive pipelines produce two wrapper proofs. A new `pair_wrapper` circuit recursively verifies both and emits one merged UltraHonk proof. The L3 contract's `submit_merged_batch` verifies that one proof and settles via `settle_batch_merged` with batch=16 arrays.
 
 ```
-                                                                         ┌─ wrapper proof₁ ─┐
-sub-batch 1 ──► batch_app_standalone ──► wrapper[noir-recursive] ───────►│                  │
-(8 tx slots)                                                             │                  │
-                                                                         │   pair_wrapper   │
-                                                                         │                  │ ──► 1 merged UltraHonk proof ──► submit_merged_batch ──► settle_batch_merged (batch=16)
-                                                                         │                  │
-sub-batch 2 ──► batch_app_standalone ──► wrapper[noir-recursive] ───────►│                  │    Aztec L2 tx (one)
-(8 tx slots)                                                             │                  │    nonce += 1
-                                                                         └─ wrapper proof₂ ─┘
+                                                                               ┌─ wrapper proof₁ ─┐
+sub-batch 1 (8 slots) ──► batch_app_standalone ──► wrapper[noir-recursive] ───►                  │
+                                                                               │                  │
+                                                                               │   pair_wrapper   │ ──► 1 merged UltraHonk ──► submit_merged_batch ──► settle_batch_merged (batch=16)
+                                                                               │                  │
+sub-batch 2 (8 slots) ──► batch_app_standalone ──► wrapper[noir-recursive] ───►                  │    One Aztec L2 tx
+                                                                               │                  │    nonce += 1
+                                                                               └─ wrapper proof₂ ─┘
 ```
 
-**Circuits**: per-tx × 8, `batch_app_standalone`, `wrapper` × 2 (at `noir-recursive` target so they can be recursively verified), **`pair_wrapper`** (new). No IVC kernels, no Chonk.
+**Total capacity per L2 tx**: **16 L3 tx slots** (= 2 sub-batches × 8 slots each, aggregated into one merged batch).
+
+**Circuits**: per-tx × 8 per sub-batch (× 2 sub-batches = 16 per-tx proofs total), `batch_app_standalone` × 2, `wrapper` × 2 (at `noir-recursive` target so they can be recursively verified), **`pair_wrapper`** (new, 1×).
 
 **New circuit** (`circuits/pair_wrapper/src/main.nr`):
 ```noir
@@ -89,47 +110,73 @@ fn main(
     wrapper_vk, wrapper_vk_hash,
     wrapper_proof_a, wrapper_public_inputs_a,
     wrapper_proof_b, wrapper_public_inputs_b,
-    // Re-fed settle data arrays from both sub-batches (for combined hashing):
-    nullifiers_a, note_hashes_a, deposits_a, withdrawals_a,
-    nullifiers_b, note_hashes_b, deposits_b, withdrawals_b,
+    // Re-fed settle-data arrays from both sub-batches so poseidon hashes match:
+    nullifiers_a[16], note_hashes_a[16], deposits_a[8], withdrawals_a[8],
+    nullifiers_b[16], note_hashes_b[16], deposits_b[8], withdrawals_b[8],
     // Merged BatchOutput public inputs (batch=16 shape):
     old_state_root: pub Field,          // = A.old
     new_state_root: pub Field,          // = B.new
-    merged_nullifiers_hash: pub Field,  // poseidon2(concat(a, b))
-    merged_note_hashes_hash: pub Field,
-    merged_deposit_nullifiers_hash: pub Field,
-    merged_withdrawal_claims_hash: pub Field,
+    merged_nullifiers_hash: pub Field,  // poseidon2(concat(a, b)) over 32 fields
+    merged_note_hashes_hash: pub Field, // concat over 32 fields
+    merged_deposit_nullifiers_hash: pub Field,   // concat over 16 fields
+    merged_withdrawal_claims_hash: pub Field,    // concat over 16 fields
     nullifier_tree_start_index: pub Field,  // = A.null_start
     note_hash_tree_start_index: pub Field,  // = A.nh_start
 ) {
     verify_honk_proof(wrapper_vk, wrapper_proof_a, wrapper_public_inputs_a, wrapper_vk_hash);
     verify_honk_proof(wrapper_vk, wrapper_proof_b, wrapper_public_inputs_b, wrapper_vk_hash);
-    // + hash-consistency, state-root chain, tree-index chain checks
-    // + build merged arrays and compute combined hashes
+    // + hash-consistency checks (re-fed arrays match each wrapper's committed hash)
+    // + state-root chain (A.new == B.old)
+    // + tree-index chain (B.null_start == A.null_start + A.null_count, etc.)
+    // + build concatenated arrays and compute combined hashes
 }
 ```
 
 **Contract method** (`contract_recursive/src/main.nr`):
 ```noir
-fn submit_merged_batch(merged_vk, merged_proof, public_inputs, merged_vk_hash, ...) {
-    assert(merged_vk_hash == self.storage.merged_vk_hash.read(), "...");
+fn submit_merged_batch(merged_vk, merged_proof, public_inputs[8], merged_vk_hash,
+                      nullifiers[32], note_hashes[32], deposits[16], withdrawals[16]) {
+    assert(merged_vk_hash == self.storage.merged_vk_hash.read(), "...");  // bind to committed VK
     verify_honk_proof(merged_vk, merged_proof, public_inputs, merged_vk_hash);
-    // count nonzeros, then
-    self.enqueue_self.settle_batch_merged(...);  // single public call, batch=16 arrays
+    // ... count nonzeros ...
+    self.enqueue_self.settle_batch_merged(
+        ..., nullifiers[32], note_hashes[32]  // batch=16-sized merged arrays
+    );
 }
 ```
 
-One `verify_honk_proof` call in the private circuit (the expensive 2× wrapper verification work happens inside `pair_wrapper` at proving time, not in the L2 tx's kernel circuit). One `settle_batch_merged` public call.
+One `verify_honk_proof` call in the private circuit. One `settle_batch_merged` public call (batch=16 arrays: 32 nullifier slots, 32 note-hash slots, 16 deposit slots, 16 withdrawal slots).
 
-### Key correctness checks in both designs
+The 2× wrapper verification work still happens — but it's amortized inside the client's `pair_wrapper` prove rather than on the L2 tx's kernel circuit.
 
-Both designs enforce:
+---
 
-1. **Proof integrity** — `verify_honk_proof` checks internal `vk` / `vk_hash` consistency and proof validity against public inputs.
-2. **Circuit binding** — contract asserts the supplied `vk_hash` equals the **`PublicImmutable`** slot committed at deployment. Proofs from foreign circuits are rejected.
-3. **State-root chain** — sub-batch 2's `old_state_root` must equal sub-batch 1's `new_state_root`.
-4. **Tree-index chain** — sub-batch 2's nullifier/note-hash start indices must equal sub-batch 1's start + its non-zero count.
-5. **Atomicity** — both sub-batches land or neither does (Aztec tx semantics + the chain-assert in the private fn / pair_wrapper).
+## Why this is NOT "IVC is 8 and Recursive is 16"
+
+Both paths have **identical** slot capacity per L2 tx: **16**.
+
+The difference is not capacity, it's proof topology:
+
+| Layer | Design A (IVC) | Design B (Recursive) |
+|---|---|---|
+| L3 per-tx circuits | 16 (8 per sub-batch × 2) | 16 (8 per sub-batch × 2) |
+| Sub-batch circuit size | `batch_app` at `MAX_BATCH_SIZE = 8` | `batch_app_standalone` at `MAX_BATCH_SIZE = 8` |
+| Sub-batches per L2 tx | 2 | 2 |
+| L2-posted proofs | 2 independent tube proofs | 1 merged UltraHonk proof (via pair_wrapper) |
+| L2-posted settle arrays | 2 × (16 nullifiers + 16 note-hashes + 8 deposits + 8 withdrawals) | 1 × (32 nullifiers + 32 note-hashes + 16 deposits + 16 withdrawals) |
+| Total settle data on L2 | same bytes in both | same bytes in both |
+
+The settle-data byte count is identical between the two designs — what differs is the **proof** byte count (1 vs 2 copies).
+
+---
+
+## Key correctness checks (shared by both designs)
+
+1. **Proof integrity** — `verify_honk_proof(vk, proof, pub_inputs, vk_hash)` checks `hash(vk) == vk_hash` and proof validity.
+2. **Circuit binding** — contract asserts `vk_hash == self.storage.*_vk_hash.read()`, where the storage slot is `PublicImmutable<Field>` set once at deployment. Blocks foreign-circuit proofs.
+3. **State-root chain** — sub-batch 2's `old_state_root` == sub-batch 1's `new_state_root`.
+4. **Tree-index chain** — sub-batch 2's start indices == sub-batch 1's start + its non-zero count.
+5. **Atomicity** — both sub-batches land or neither does (Aztec tx semantics + in-circuit chain assertions).
 
 ---
 
@@ -138,41 +185,36 @@ Both designs enforce:
 ### Prerequisites
 
 - **OS**: Linux, or Windows 11 with WSL2.
-- **Memory**: ≥ 16 GiB RAM. For Design B concurrent proving (not used in the shipped step9), ≥ 24 GiB RAM.
+- **Memory**: ≥ 16 GiB RAM. For Design B concurrent sub-batch proving (optional, gives ~2× speedup), ≥ 24 GiB RAM.
 - **Docker** (for the Aztec sandbox).
-- **Node.js** (provided by `aztec-up`, via nvm).
-- **Aztec CLI toolchain**: `@aztec/aztec` v4.2.0-nightly.20260408 (pinned by the repo).
+- **Node.js** (via `aztec-up` → nvm).
+- **Aztec CLI toolchain**: `@aztec/aztec` v4.2.0-nightly.20260408 (pinned).
 
 ### One-time setup
 
 **On Windows with WSL2:**
 
-1. Configure WSL2 memory. Create or edit `%USERPROFILE%\.wslconfig`:
+1. Configure WSL2 memory. Create `%USERPROFILE%\.wslconfig`:
    ```ini
    [wsl2]
    memory=16GB
    swap=16GB
    ```
-   Then run `wsl --shutdown` from a Windows shell to apply.
+   Then `wsl --shutdown` from a Windows shell to apply.
 
 2. Install the Aztec toolchain inside WSL:
    ```bash
-   # Install the aztec-up version manager:
    bash -c "$(curl -fsSL https://install.aztec-labs.com/aztec-up)"
-
-   # Install the pinned version:
    aztec-up install 4.2.0-nightly.20260408
    ```
 
-   This pulls node via nvm, nargo, foundry, and the aztec npm packages into `~/.aztec/`.
-
-3. Add to your shell profile the PATH setup that makes `aztec`, `nargo`, and `bb` reachable:
+3. Add to `~/.bashrc` (or equivalent) so `aztec`, `nargo`, and `bb` are on PATH:
    ```bash
    . ~/.nvm/nvm.sh
    export PATH="$HOME/.aztec/current/bin:$HOME/.aztec/current/node_modules/.bin:$PATH"
    ```
 
-**On native Linux**: same as step 2+3 above (skip the `.wslconfig` step).
+**On native Linux**: same as steps 2 and 3.
 
 ### Clone and compile
 
@@ -183,43 +225,46 @@ cd <this-repo>
 # Compile all circuits + both contracts, AVM-transpile, strip internal prefixes:
 aztec compile --workspace --force
 
-# Compile pair_wrapper as a standalone circuit (nargo handles it directly):
+# Compile pair_wrapper as a standalone bin crate:
 cd circuits/pair_wrapper && nargo compile && cd ../..
 ```
 
-Expected `target/` contents:
-- `l3_batch_app.json`, `l3_init_kernel.json`, `l3_tail_kernel.json`, `l3_hiding_kernel.json`, `l3_tube.json` — IVC circuits
-- `l3_batch_app_standalone.json`, `l3_wrapper.json`, `l3_pair_wrapper.json` — recursive circuits
-- `l3_deposit.json`, `l3_payment.json`, `l3_withdraw.json`, `l3_padding.json` — per-tx circuits
-- `l3_ivc_settlement-L3IvcSettlement.json`, `l3_recursive_settlement-L3RecursiveSettlement.json` — contracts
-- `token_contract-Token.json` — Token contract (pulled from aztec-packages deps)
+Expected `target/` artifacts (both paths share per-tx circuits):
+
+| File | Used by |
+|---|---|
+| `l3_deposit.json`, `l3_payment.json`, `l3_withdraw.json`, `l3_padding.json` | Both designs (per-tx proofs) |
+| `l3_batch_app.json` (MAX_BATCH_SIZE=8) | Design A only |
+| `l3_init_kernel.json`, `l3_tail_kernel.json`, `l3_hiding_kernel.json`, `l3_tube.json` | Design A only |
+| `l3_batch_app_standalone.json` (MAX_BATCH_SIZE=8) | Design B only |
+| `l3_wrapper.json` | Design B only |
+| `l3_pair_wrapper.json` | Design B only |
+| `l3_ivc_settlement-L3IvcSettlement.json` | Design A contract |
+| `l3_recursive_settlement-L3RecursiveSettlement.json` | Design B contract |
+| `token_contract-Token.json` | Both (L2 token the deposits transfer) |
 
 ### Run the Noir unit tests
-
-Before running the e2e tests, sanity-check that both contracts' Noir unit tests pass:
 
 ```bash
 cd contract_ivc && aztec test && cd ..
 cd contract_recursive && aztec test && cd ..
 ```
 
-Expected: 5/5 passing in each, covering deploy, deposit+immediate-withdraw, full lifecycle, double-claim rejection, state-root-chain rejection.
+Expected: 5/5 passing in each.
 
 ### Start the sandbox
-
-The Aztec sandbox is an L2 node + Anvil L1 node running in Docker.
 
 ```bash
 cd tests
 docker compose up -d
-# Wait ~30 seconds for the sandbox to initialize.
+# Wait ~30 seconds, then sanity check:
 curl -s -X POST http://localhost:8080/ \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"node_getNodeInfo","params":[]}' \
   | grep nodeVersion
 ```
 
-Should print a line with `"nodeVersion":"4.2.0-nightly.20260408"`.
+Should show `"nodeVersion":"4.2.0-nightly.20260408"`.
 
 ### Install test dependencies
 
@@ -228,36 +273,33 @@ cd tests
 npm install
 ```
 
-### Run the tests
+### Run the two e2e tests
 
-**Design A — IVC meta-batch (step8):**
+**Design A — IVC meta-batch (16 slot capacity via submit_two_batches):**
 ```bash
 cd tests
 npx tsx step8-ivc-meta-16slot.ts
 ```
 
-**Design B — Recursive merged-proof (step9):**
+**Design B — Recursive merged-proof (16 slot capacity via pair_wrapper + submit_merged_batch):**
 ```bash
 cd tests
 npx tsx step9-recursive-merged-16slot.ts
 ```
 
-Each test takes several minutes. They deploy fresh contracts, register 2 L2→L3 deposits, build the proofs, submit via the respective method, and verify the on-chain state advanced correctly.
-
-For long-running tests under WSL, it's useful to run detached and tail the log:
-
+For long runs under WSL, run detached and tail:
 ```bash
-cd tests
 nohup npx tsx step8-ivc-meta-16slot.ts > /tmp/step8.log 2>&1 &
 tail -f /tmp/step8.log
 ```
 
 ### Expected output
 
-Both tests print a `=== SUMMARY ===` block at the end. Representative values (measured on a Windows 11 host with 16 GiB WSL allocation):
+Each test prints a `=== SUMMARY ===` block at the end. Representative values (Windows 11 host, 16 GiB WSL):
 
-**step8 (IVC meta-batch):**
+**step8 (Design A, IVC meta-batch):**
 ```
+  Sub-batches: 2 × (1 real + 7 padding) at batch=8  -> 16 slot capacity
   Per-tx proofs wall-clock: 328 ms
   Concurrent batch proving: 2.59 min
   L2 submit wall-clock:     5.7 s
@@ -267,8 +309,9 @@ Both tests print a `=== SUMMARY ===` block at the end. Representative values (me
   Public execution cost:    2 × settle_batch@batch=8 sequentially
 ```
 
-**step9 (Recursive merged-proof):**
+**step9 (Design B, Recursive merged-proof):**
 ```
+  Sub-batches: 2 × (1 real + 7 padding) at batch=8, aggregated -> 16 slot capacity
   Per-tx proofs:              401 ms
   Sub-batch A prove:          4.86 min
   Sub-batch B prove:          4.94 min
@@ -283,7 +326,7 @@ Both tests print a `=== SUMMARY ===` block at the end. Representative values (me
   Final on-chain proof size:  16608 bytes (identical to wrapper)
 ```
 
-Both tests also write a structured metrics JSON to:
+Structured metrics are emitted to:
 - `target/step8-metrics.json`
 - `target/step9-metrics.json`
 
@@ -291,83 +334,103 @@ Both tests also write a structured metrics JSON to:
 
 ## Why the wall-clock numbers diverge
 
-Design A's sub-batch proving is **IVC/Chonk** (via `AztecClientBackend.prove`). At batch=8 each sub-batch prove peaks ~4-5 GiB RSS. Two concurrent fit in 16 GiB, so `Promise.all` gives near-linear speedup.
+Both designs do the same ZK work: 16 per-tx UltraHonk proofs + 2 sub-batch proofs. Design B additionally runs `pair_wrapper` (~1 min). So at a minimum, Design B is ≈ 1 min slower.
 
-Design B's sub-batch proving is **UltraHonk-to-UltraHonk recursion** (batch_app_standalone + wrapper). Each sub-batch prove peaks ~7-9 GiB RSS. Two concurrent exceed 16 GiB and spill to swap — in practice this made them take **~19 min** (tested once, then reverted). So step9 runs sub-batches **sequentially**, which doubles the linear-time cost but is still faster than the swap-thrashed concurrent path.
+The larger delta comes from **concurrency limits under memory pressure**:
 
-If you run step9 on a host with ≥24 GiB RAM, you can re-enable concurrent sub-batch proving by replacing the sequential block in `step9-recursive-merged-16slot.ts` with a `Promise.all` using a second `Barretenberg` instance. Expected projection: ~5 min total proving (vs 10.7 min sequential).
+- Design A's sub-batch proving is **IVC/Chonk** (via `AztecClientBackend.prove`). Each sub-batch prove peaks ~4-5 GiB RSS. Two concurrent fit in 16 GiB — `Promise.all` gives near-linear speedup (~2× over sequential).
+- Design B's sub-batch proving is **UltraHonk-to-UltraHonk** (`batch_app_standalone` + `wrapper`). Each sub-batch prove peaks ~7-9 GiB RSS. Two concurrent exceed 16 GiB and spill to swap — empirically this made two concurrent proves take **~19 min** vs ~9.8 min sequential, so step9 runs sub-batches **sequentially** to fit the 16 GiB budget.
+
+If you run step9 on a host with ≥ 24 GiB RAM, you can re-enable concurrent sub-batch proving. Change this block in `step9-recursive-merged-16slot.ts`:
+```ts
+const artifactA = await buildBatchProofRecursive(api, l3State, [depProofA], {...});
+const artifactB = await buildBatchProofRecursive(api, l3StateB, [depProofB], {...});
+```
+to:
+```ts
+const apiB = await Barretenberg.new({ threads: 4 });
+const [artifactA, artifactB] = await Promise.all([
+  buildBatchProofRecursive(api,  l3State,  [depProofA], {...}),
+  buildBatchProofRecursive(apiB, l3StateB, [depProofB], {...}),
+]);
+```
+
+Expected projection with enough RAM: ≈ 5 min total proving (vs 10.7 min sequential).
 
 ---
 
 ## Why the DA numbers differ
 
-Both designs post the same per-batch settle data (nullifiers, note-hashes, deposit-nullifiers, withdrawal-claims) — so settle data scales identically with slot count.
+Both designs post the same per-batch settle data; what differs is the **proof** material.
 
-The difference is **proof material**:
+Breakdown of L2 function arguments:
 
 | | Shared VK | Proofs | Pub inputs | Settle data | Total |
 |---|---|---|---|---|---|
 | Design A | 115 × 32 = 3,680 B | **2** × 519 × 32 = 33,216 B | 2 × 8 × 32 = 512 B | 2 × 48 × 32 = 3,072 B | **40,512 B** |
 | Design B | 115 × 32 = 3,680 B | **1** × 519 × 32 = 16,608 B | 1 × 8 × 32 = 256 B | 1 × 96 × 32 = 3,072 B | **23,648 B** |
 
-Design B saves one entire proof body on calldata (~16,864 bytes or **-42%**). The trade-off: you paid for `pair_wrapper` proving (~1 min) to earn that DA reduction.
+Design B saves **one entire proof body** on calldata (−16,864 B or −42%). The settle data (nullifiers, note-hashes, deposits, withdrawals) is the same total bytes in both: Design A posts 2 × (16+16+8+8) = 96 fields, Design B posts 1 × (32+32+16+16) = 96 fields.
+
+The trade-off: you paid for `pair_wrapper` proving (~1 min extra) to earn that DA reduction.
 
 ---
 
 ## Circuit-binding security (vk_hash)
 
-Both contracts store VK hashes in **`PublicImmutable<Field>`** slots, initialized once in the constructor. Every submit method asserts the caller-supplied `vk_hash` matches the stored value before invoking `verify_honk_proof`:
+Both contracts store VK hashes in **`PublicImmutable<Field>`** slots, initialized once in the constructor. Every submit method asserts the caller-supplied `vk_hash` equals the stored value *before* calling `verify_honk_proof`:
 
 ```noir
-// contract_ivc — submit_batch and submit_two_batches:
-assert(
-    tube_vk_hash == self.storage.tube_vk_hash.read(),
-    "submit_*: tube_vk_hash does not match contract's committed hash",
-);
+// contract_ivc, submit_batch and submit_two_batches:
+assert(tube_vk_hash == self.storage.tube_vk_hash.read(), "...");
 verify_honk_proof(tube_vk, tube_proof, public_inputs, tube_vk_hash);
+
+// contract_recursive, submit_merged_batch:
+assert(merged_vk_hash == self.storage.merged_vk_hash.read(), "...");
+verify_honk_proof(merged_vk, merged_proof, public_inputs, merged_vk_hash);
 ```
 
-Without this check, `verify_honk_proof` only enforces internal consistency between the passed `vk` and its hash. A malicious caller could otherwise submit any valid UltraHonk proof from any circuit paired with its own matching hash. The `PublicImmutable` binding rules out foreign-circuit proofs at L2.
+Without this binding, `verify_honk_proof` only enforces internal `vk`/`vk_hash` consistency. An attacker could submit a valid UltraHonk proof from any circuit paired with its matching hash. The `PublicImmutable` check rules that out — only proofs from the circuit committed at deployment are accepted.
 
 ---
 
 ## File map
 
-| File | Purpose |
+| File | Role |
 |---|---|
-| `circuits/pair_wrapper/{Nargo.toml,src/main.nr}` | **New**: aggregator circuit, verifies 2 wrappers → 1 merged proof. |
-| `circuits/batch_app_standalone/src/main.nr` | Recursive-path batch circuit (`MAX_BATCH_SIZE = 8`). |
-| `circuits/wrapper/src/main.nr` | Verifies `batch_app_standalone` proof; target chosen at prove time. |
-| `circuits/batch_app/src/main.nr` | IVC-path batch circuit (`MAX_BATCH_SIZE = 8`). |
-| `circuits/{init,tail,hiding}_kernel`, `circuits/tube` | IVC kernels + rollup-target compressor. |
-| `contract_ivc/src/main.nr` | `L3IvcSettlement`: `submit_batch`, `submit_two_batches`. |
-| `contract_recursive/src/main.nr` | `L3RecursiveSettlement`: `submit_batch`, **new** `submit_merged_batch`, `settle_batch_merged`. |
-| `tests/harness/prover.ts` | IVC pipeline prover (`buildBatchProof`, `computeTubeVkHash`). |
-| `tests/harness/prover-recursive.ts` | Recursive pipeline prover (`buildBatchProofRecursive`, **new** `buildPairWrapperProof`, **new** `computePairWrapperVkHash`). |
-| `tests/harness/state.ts` | Shared `TestL3State` (trees, notes, state root) + batch sizings. |
-| `tests/step8-ivc-meta-16slot.ts` | **Design A e2e test**. |
-| `tests/step9-recursive-merged-16slot.ts` | **Design B e2e test**. |
-| `target/step8-metrics.json`, `target/step9-metrics.json` | Metrics emitted by each run. |
+| `circuits/pair_wrapper/{Nargo.toml,src/main.nr}` | **New**: aggregator circuit (verifies 2 wrappers → 1 merged proof) |
+| `circuits/batch_app_standalone/src/main.nr` | Recursive sub-batch circuit (`MAX_BATCH_SIZE = 8`) |
+| `circuits/wrapper/src/main.nr` | Verifies `batch_app_standalone`; verifier target selected at prove time |
+| `circuits/batch_app/src/main.nr` | IVC sub-batch circuit (`MAX_BATCH_SIZE = 8`) |
+| `circuits/{init,tail,hiding}_kernel/`, `circuits/tube/` | IVC kernels + rollup-target compressor |
+| `contract_ivc/src/main.nr` | `L3IvcSettlement`: `submit_batch`, `submit_two_batches` |
+| `contract_recursive/src/main.nr` | `L3RecursiveSettlement`: `submit_batch`, **new** `submit_merged_batch`, **new** `settle_batch_merged` |
+| `tests/harness/prover.ts` | IVC prover (`buildBatchProof`, `computeTubeVkHash`) |
+| `tests/harness/prover-recursive.ts` | Recursive prover (`buildBatchProofRecursive`, **new** `buildPairWrapperProof`, **new** `computePairWrapperVkHash`) |
+| `tests/harness/state.ts` | `TestL3State` + shared batch sizings (both `IVC_BATCH_SIZING` and `RECURSIVE_BATCH_SIZING` at 8/16/16) |
+| `tests/step8-ivc-meta-16slot.ts` | **Design A e2e test** |
+| `tests/step9-recursive-merged-16slot.ts` | **Design B e2e test** |
+| `target/step8-metrics.json`, `target/step9-metrics.json` | Metrics JSON written by each run |
 
 ---
 
 ## Caveats and honest limits
 
-1. **1 real tx per sub-batch, 7 padding.** The tests use 16 slot capacity = 2 real + 14 padding, matching the current prover harness. It generates all tx proofs against a single state snapshot, which only works for the first tx in each batch. Multi-real-tx batches require intermediate state roots between per-tx proofs — a separate refactor (see `DESIGN_DECISIONS.md` and the skip note in `step4-full-lifecycle.ts` step 9). The circuits themselves support multi-tx; the Noir unit tests in both contracts exercise it with synthetic state.
+1. **1 real tx per sub-batch + 7 padding**. The tests use 16 slot capacity but ship 2 real + 14 padding (1 real per sub-batch). The prover harness generates per-tx proofs against a single state snapshot, which only works for the first tx in each batch. Multi-real-tx-per-batch needs intermediate state roots (a separate refactor — see `DESIGN_DECISIONS.md` and the skip note in `step4-full-lifecycle.ts`). The **circuits** already support multi-tx; the Noir unit tests in both contracts exercise it with synthetic state.
 
-2. **Sandbox `realProofs: false`**. The Aztec sandbox disables the outer **rollup proof** (the one over a whole L2 block). It does NOT disable private-kernel proof verification, which is what enforces the `verify_honk_proof` calls inside submit methods. Proof check coverage was confirmed experimentally by the step4 corrupt-proof probe, which the sandbox correctly rejects.
+2. **Sandbox `realProofs: false`**. The sandbox disables the outer **rollup proof** (over a whole L2 block) but **not** private-kernel proof verification, which is what enforces the `verify_honk_proof` calls in submit methods. Coverage was confirmed by `step4-full-lifecycle.ts`'s corrupt-proof probe, which the sandbox correctly rejects.
 
-3. **Gas-receipt surfacing**. The Aztec.js version shipped with 4.2.0-nightly.20260408 doesn't expose a receipt-with-gasUsed from `.send()`. Public execution cost is reasoned structurally (loop bounds in `settle_batch*`) rather than measured. Adding real gas figures is a drop-in follow-up via `node.getTxReceipt(txHash)`.
+3. **Gas-receipt surfacing**. The Aztec.js version in 4.2.0-nightly.20260408 doesn't expose `gasUsed` from `.send()`. Public execution cost is reasoned structurally (loop bounds in `settle_batch*`). Adding real gas figures is a drop-in follow-up via `node.getTxReceipt(txHash)`.
 
-4. **Concurrent recursive proving needs more RAM than shipped**. The step9 uses sequential sub-batch proving because concurrent exceeded the 16 GiB WSL budget and spilled to swap. A host with ≥24 GiB RAM can enable concurrent proving for an approximate 2× speedup.
+4. **Concurrent proving for Design B needs more RAM than shipped**. step9 runs sub-batches sequentially to fit 16 GiB. With ≥ 24 GiB RAM, concurrent sub-batch proving gives ~2× speedup (edit step9 per the section above).
 
-5. **16 GiB WSL memory is a hard requirement for step9**. Default WSL2 is ~50% of host RAM. On low-RAM hosts, either set `.wslconfig` as documented or step9's `bb` worker will OOM during `batch_app_standalone` proving.
+5. **16 GiB WSL memory is required for step9**. Default WSL2 is ~50% of host RAM. Without the `.wslconfig` memory boost, `bb` OOMs during `batch_app_standalone` proving.
 
 ---
 
 ## Where to go from here
 
-- **Push batch size**: batch_app_standalone compiles to batch=128 per the ACIR-opcode table in `DESIGN_DECISIONS.md` §3. The ceiling is prover memory and wall-clock, not protocol. For IVC, batch=8 was tested end-to-end but batch sizes above that hit the Chonk ECCVM 32,768-row ceiling.
-- **Generalize aggregation**: `pair_wrapper` trivially extends to a binary tree (`pair_wrapper(pair_wrapper(w1,w2), pair_wrapper(w3,w4))` → batch=32, etc.) with no new circuits, just more layer-2 invocations. Each extra layer adds one `pair_wrapper` prove (~1 min) and doubles the underlying settle data.
-- **Multi-real-tx prover**: refactor `buildBatchProof` / `buildBatchProofRecursive` to generate per-tx proofs against intermediate state roots, unlocking higher real throughput per batch.
-- **Measure L2 gas**: hook up `node.getTxReceipt(txHash)` to populate `daGas` / `l2Gas` / `publicGas` into the metrics JSON.
+- **Push sub-batch size**: `batch_app_standalone` compiles to batch=128 per `DESIGN_DECISIONS.md` §3. The ceiling is prover memory and wall-clock, not protocol. For IVC, the Chonk ECCVM 32,768-row ceiling limits batch=8 as the last known-good size — higher may not compile through the IVC/Chonk path.
+- **Generalize aggregation**: `pair_wrapper` extends trivially to a binary tree (`pair(pair(w1,w2), pair(w3,w4))` → 32 slots, etc.) with no new circuits, just more invocations. Each extra layer adds one `pair_wrapper` prove (~1 min) and doubles the underlying settle data on the final L2 tx.
+- **Multi-real-tx prover**: refactor `buildBatchProof` / `buildBatchProofRecursive` to chain per-tx state roots so each sub-batch can hold 8 real txs. Combined with the current 2-sub-batch bundling, that gives **16 real txs per L2 tx**.
+- **Measure L2 gas**: hook up `node.getTxReceipt(txHash)` to fill `daGas` / `l2Gas` / `publicGas` into the metrics JSON.
