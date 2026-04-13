@@ -20,7 +20,10 @@ import { readFileSync } from "fs";
 import { resolve } from "path";
 
 const NODE_URL = process.env.AZTEC_NODE_URL ?? "http://localhost:8080";
-const L3_ARTIFACT = resolve(import.meta.dirname ?? ".", "../target/l3_settlement-L3Settlement.json");
+const L3_ARTIFACT = resolve(
+  import.meta.dirname ?? ".",
+  "../target/l3_ivc_settlement-L3IvcSettlement.json",
+);
 
 async function view(method: any, from: any): Promise<any> {
   const r = await method.simulate({ from });
@@ -63,7 +66,7 @@ async function main() {
   console.log(`   depositor private balance: ${privBal}`);
 
   // 3. Create authwit for deposit
-  console.log("\n3. Create authwit for L3Settlement.deposit -> Token.transfer_to_public...");
+  console.log("\n3. Create authwit for L3IvcSettlement.deposit -> Token.transfer_to_public...");
   const depositAmount = 500n;
   const nonce = Fr.random();
   const depositSalt = Fr.random();

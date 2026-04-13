@@ -16,21 +16,19 @@ pub global CHONK_PROOF_LENGTH: u32 = 1935;
 pub global MEGA_VK_LENGTH: u32 = 127;
 
 pub global TREE_DEPTH: u32 = 20;
-// NOTE: MAX_BATCH_SIZE reduced to 4 for testing. The Chonk ECCVM circuit has a fixed
-// upper bound of 32768 rows; 32 tx proof verifications exceed this limit. Increase to
-// 32 (or higher) once the ECCVM bound is raised or a split-proving strategy is in place.
-pub global MAX_BATCH_SIZE: u32 = 4;
 
 // Per-tx layout: up to 2 input notes consumed, 2 output notes produced.
+// These are per-transaction and identical across pipelines.
 pub global MAX_NOTES_PER_TX: u32 = 2;
 pub global MAX_OUTPUTS_PER_TX: u32 = 2;
 pub global TX_PUBLIC_INPUT_COUNT: u32 = 5; // 2 nullifiers + 2 note hashes + state_root
 
-// Flat batch array sizes (per-tx slots x batch size).
-pub global BATCH_NULLIFIERS_COUNT: u32 = 8; // MAX_BATCH_SIZE * MAX_NOTES_PER_TX
-pub global BATCH_NOTE_HASHES_COUNT: u32 = 8; // MAX_BATCH_SIZE * MAX_OUTPUTS_PER_TX
-
+// Size of the BatchOutput struct in fields. Identical for IVC and Recursive pipelines.
 pub global BATCH_OUTPUT_FIELDS: u32 = 8;
+
+// NOTE: MAX_BATCH_SIZE, BATCH_NULLIFIERS_COUNT, and BATCH_NOTE_HASHES_COUNT are NOT
+// defined here. They differ per pipeline and are owned by each batch-aggregation
+// circuit (circuits/batch_app for IVC, circuits/batch_app_standalone for Recursive).
 
 // Re-export the canonical poseidon2_hash from the Aztec protocol types.
 // This guarantees consistency across circuits, contract, and TypeScript.

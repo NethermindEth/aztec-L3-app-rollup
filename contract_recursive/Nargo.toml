@@ -1,5 +1,5 @@
 [package]
-name = "l3_settlement"
+name = "l3_recursive_settlement"
 type = "contract"
 authors = []
 compiler_version = ">=0.25.0"

@@ -13,16 +13,17 @@ import { Grumpkin } from "@aztec/foundation/crypto/grumpkin";
 import { Noir } from "@aztec/noir-noir_js";
 import { readFileSync } from "fs";
 import { resolve } from "path";
-import type { TestL3State, SettleBatchInputs, L3Note } from "./state.js";
+import { IVC_BATCH_SIZING, type TestL3State, type SettleBatchInputs, type L3Note } from "./state.js";
 
 const TARGET_DIR = resolve(import.meta.dirname ?? ".", "../../target");
 const TREE_DEPTH = 20;
-// NOTE: reduced to 4 for testing (Chonk ECCVM limit). See circuits/types/src/lib.nr.
-const MAX_BATCH_SIZE = 4;
+// IVC pipeline batch sizes. Must match circuits/batch_app/src/main.nr globals
+// and contract_ivc/src/main.nr. Bounded by the Chonk ECCVM 32768-row limit.
+const MAX_BATCH_SIZE = IVC_BATCH_SIZING.maxBatchSize;        // 8
 const MAX_NOTES_PER_TX = 2;
 const MAX_OUTPUTS_PER_TX = 2;
-const BATCH_NULLIFIERS_COUNT = 8; // MAX_BATCH_SIZE * MAX_NOTES_PER_TX
-const BATCH_NOTE_HASHES_COUNT = 8; // MAX_BATCH_SIZE * MAX_OUTPUTS_PER_TX
+const BATCH_NULLIFIERS_COUNT = IVC_BATCH_SIZING.batchNullifiersCount;   // 16
+const BATCH_NOTE_HASHES_COUNT = IVC_BATCH_SIZING.batchNoteHashesCount;  // 16
 const MEGA_VK_LENGTH = 127;
 
 // -------------------------------------------------------------------------
@@ -390,7 +391,7 @@ export async function buildBatchProof(
   const settleEntries = slots.map((sl) => ({
     type: sl.type as any, nullifiers: sl.nullifiers, noteHashes: sl.noteHashes,
   }));
-  const settleInputs = await state.buildSettleInputs(settleEntries);
+  const settleInputs = await state.buildSettleInputs(settleEntries, IVC_BATCH_SIZING);
 
   // 3. Execute batch_app.
   console.log("    Executing batch_app...");

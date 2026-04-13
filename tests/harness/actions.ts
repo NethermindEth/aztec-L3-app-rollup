@@ -102,6 +102,10 @@ export class L3Harness {
 
     const artifact = await buildBatchProof(this.api, this.state, slots);
 
+    // Count non-zero entries for tree index advancement.
+    const nullCount = artifact.settleInputs.nullifiers.filter((f: Fr) => !f.equals(Fr.ZERO)).length;
+    const nhCount = artifact.settleInputs.noteHashes.filter((f: Fr) => !f.equals(Fr.ZERO)).length;
+
     if (this.callPrivate) {
       const publicInputs = [
         artifact.oldStateRoot,
@@ -135,19 +139,14 @@ export class L3Harness {
     } else {
       await this.callPublicAsL3(
         this.l3Contract.methods.settle_batch(
-          Fr.ZERO,
           artifact.oldStateRoot,
           artifact.newStateRoot,
-          artifact.settleInputs.nullifiersBatchHash,
-          artifact.settleInputs.noteHashesBatchHash,
-          artifact.settleInputs.depositNullifiersHash,
-          artifact.settleInputs.withdrawalClaimsHash,
-          artifact.nullifierTreeStartIndex,
-          artifact.noteHashTreeStartIndex,
-          artifact.settleInputs.nullifiers,
-          artifact.settleInputs.noteHashes,
           artifact.settleInputs.depositNullifiers,
           artifact.settleInputs.withdrawalClaims,
+          nullCount,
+          nhCount,
+          artifact.settleInputs.nullifiers,
+          artifact.settleInputs.noteHashes,
         ),
       );
     }

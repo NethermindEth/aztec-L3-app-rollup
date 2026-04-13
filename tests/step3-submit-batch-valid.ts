@@ -24,15 +24,18 @@ import { readFileSync } from "fs";
 import { resolve } from "path";
 
 const NODE_URL = process.env.AZTEC_NODE_URL ?? "http://localhost:8080";
-const L3_ARTIFACT = resolve(import.meta.dirname ?? ".", "../target/l3_settlement-L3Settlement.json");
+const L3_ARTIFACT = resolve(
+  import.meta.dirname ?? ".",
+  "../target/l3_ivc_settlement-L3IvcSettlement.json",
+);
 
 const VK_LEN = 115;
 const PROOF_LEN = 500;
 const BATCH_OUTPUT_FIELDS = 8;
-// NOTE: reduced to 4 for testing (Chonk ECCVM limit).
-const BATCH_NULL_COUNT = 8;
-const BATCH_NH_COUNT = 8;
-const MAX_BATCH = 4;
+// IVC pipeline batch size 8.
+const BATCH_NULL_COUNT = 16;
+const BATCH_NH_COUNT = 16;
+const MAX_BATCH = 8;
 
 async function view(method: any, from: any): Promise<any> {
   const r = await method.simulate({ from });

@@ -1,12 +1,24 @@
+// batch_app_standalone -- UltraHonk-compatible variant of batch_app.
+//
+// Identical circuit logic to batch_app but uses explicit pub Field outputs
+// instead of return_data BatchOutput. This avoids databus (CallData/ReturnData)
+// constraints that require MegaCircuitBuilder, allowing the circuit to be
+// proved as a standalone UltraHonk proof.
+//
+// The 8 public outputs match BatchOutput's fields in order.
+
 use l3_types::{
     TREE_DEPTH, MAX_NOTES_PER_TX, MAX_OUTPUTS_PER_TX, TX_PUBLIC_INPUT_COUNT,
-    BatchOutput, IndexedLeaf, poseidon2_hash,
+    IndexedLeaf, poseidon2_hash,
     compute_state_root, compute_merkle_root,
 };
 use bb_proof_verification::{verify_honk_proof, UltraHonkVerificationKey, UltraHonkZKProof};
 
-// IVC pipeline batch sizes. Bounded by the Chonk ECCVM circuit limit of 32768 rows;
-// batch=8 is experimental -- verify Chonk prove doesn't overflow ECCVM at this size.
+// Recursive pipeline sub-batch size. No Chonk/ECCVM bottleneck because this
+// circuit is proved as standalone UltraHonk (not via IVC). Scales linearly with
+// batch size. Currently set to 8 as the per-sub-batch unit; larger total batch
+// sizes are achieved by recursively aggregating multiple 8-tx proofs via the
+// pair_wrapper circuit (e.g. 2 -> 16 txs total, 4 -> 32 total, etc.).
 global MAX_BATCH_SIZE: u32 = 8;
 global BATCH_NULLIFIERS_COUNT: u32 = 16; // MAX_BATCH_SIZE * MAX_NOTES_PER_TX
 global BATCH_NOTE_HASHES_COUNT: u32 = 16; // MAX_BATCH_SIZE * MAX_OUTPUTS_PER_TX
@@ -41,8 +53,6 @@ fn main(
     new_note_hash_tree_root: Field,
 
     // -- Indexed nullifier tree insertion witnesses --
-    // For each nullifier slot: the low leaf (predecessor in sorted order),
-    // its Merkle siblings, and the Merkle siblings for the new leaf position.
     nullifier_low_leaves: [IndexedLeaf; BATCH_NULLIFIERS_COUNT],
     nullifier_low_leaf_indices: [Field; BATCH_NULLIFIERS_COUNT],
     nullifier_low_leaf_siblings: [[Field; TREE_DEPTH]; BATCH_NULLIFIERS_COUNT],
@@ -51,19 +61,16 @@ fn main(
     // -- Append-only note hash tree insertion witnesses --
     note_hash_insertion_siblings: [[Field; TREE_DEPTH]; BATCH_NOTE_HASHES_COUNT],
 
-    // These 8 fields flow to the next kernel via return_data BatchOutput.
-    // They are NOT declared pub because in the IVC context, pub inputs inflate
-    // the VK's num_public_inputs beyond the IVC IO size, breaking accumulation.
-    // The values are still constrained by asserts in the circuit body.
-    old_state_root: Field,
-    new_state_root: Field,
-    nullifiers_batch_hash: Field,
-    note_hashes_batch_hash: Field,
-    deposit_nullifiers_hash: Field,
-    withdrawal_claims_hash: Field,
-    nullifier_tree_start_index: Field,
-    note_hash_tree_start_index: Field,
-) -> return_data BatchOutput {
+    // --- public inputs (explicit, no databus) ---
+    old_state_root: pub Field,
+    new_state_root: pub Field,
+    nullifiers_batch_hash: pub Field,
+    note_hashes_batch_hash: pub Field,
+    deposit_nullifiers_hash: pub Field,
+    withdrawal_claims_hash: pub Field,
+    nullifier_tree_start_index: pub Field,
+    note_hash_tree_start_index: pub Field,
+) {
     // 0. Boundary sanity.
     assert(
         deposit_count + payment_count + withdraw_count <= MAX_BATCH_SIZE,
@@ -83,8 +90,8 @@ fn main(
     // Accumulators.
     let mut nullifiers: [Field; BATCH_NULLIFIERS_COUNT] = [0; BATCH_NULLIFIERS_COUNT];
     let mut note_hashes: [Field; BATCH_NOTE_HASHES_COUNT] = [0; BATCH_NOTE_HASHES_COUNT];
-    let mut deposit_nullifiers: [Field; MAX_BATCH_SIZE] = [0; MAX_BATCH_SIZE];
-    let mut withdrawal_claims: [Field; MAX_BATCH_SIZE] = [0; MAX_BATCH_SIZE];
+    let mut deposit_nullifiers_arr: [Field; MAX_BATCH_SIZE] = [0; MAX_BATCH_SIZE];
+    let mut withdrawal_claims_arr: [Field; MAX_BATCH_SIZE] = [0; MAX_BATCH_SIZE];
 
     // Running tree roots.
     let mut cur_null_root = old_nullifier_tree_root;
@@ -131,10 +138,12 @@ fn main(
 
         if is_real {
             // --- State binding ---
-            let expected_state = compute_state_root(cur_null_root, cur_nh_root);
+            // All txs in a batch prove against the batch's starting state root.
+            // Within-batch double-spends are caught by the indexed nullifier
+            // tree insertion below (duplicate values fail to insert).
             assert(
-                tx_public_inputs[i][4] == expected_state,
-                "tx state root does not match running state",
+                tx_public_inputs[i][4] == old_state_root,
+                "tx state root does not match batch state",
             );
 
             // --- Insert nullifiers (indexed tree) ---
@@ -155,7 +164,6 @@ fn main(
                     );
 
                     // b. Sandwich: low.value < null_val < low.next_value
-                    //    (or low.next_value == 0 meaning tail of list).
                     assert(
                         low.value.lt(null_val),
                         "indexed insert: low leaf value not less than nullifier",
@@ -186,13 +194,11 @@ fn main(
                         next_value: low.next_value,
                     };
 
-                    // Verify the slot is empty (hash == 0) in the intermediate tree.
                     assert(
                         compute_merkle_root(0, null_idx, new_sibs) == intermediate_root,
                         "indexed insert: new leaf slot not empty",
                     );
 
-                    // Compute the new root after inserting the new leaf.
                     cur_null_root = compute_merkle_root(
                         new_leaf.hash(),
                         null_idx,
@@ -204,7 +210,7 @@ fn main(
                 nullifiers[i * MAX_NOTES_PER_TX + j] = null_val;
             }
 
-            // --- Insert note hashes (append-only tree, unchanged) ---
+            // --- Insert note hashes (append-only tree) ---
             for j in 0..MAX_OUTPUTS_PER_TX {
                 let nh_val = tx_public_inputs[i][MAX_NOTES_PER_TX + j];
                 let sib_idx = i * MAX_OUTPUTS_PER_TX + j;
@@ -229,10 +235,10 @@ fn main(
 
         // --- Route deposit / withdrawal metadata (structural) ---
         if is_deposit {
-            deposit_nullifiers[i] = tx_public_inputs[i][0];
+            deposit_nullifiers_arr[i] = tx_public_inputs[i][0];
         }
         if is_withdraw {
-            withdrawal_claims[i] = tx_public_inputs[i][MAX_NOTES_PER_TX];
+            withdrawal_claims_arr[i] = tx_public_inputs[i][MAX_NOTES_PER_TX];
         }
     }
 
@@ -256,22 +262,11 @@ fn main(
         "note hashes batch hash mismatch",
     );
     assert(
-        poseidon2_hash(deposit_nullifiers) == deposit_nullifiers_hash,
+        poseidon2_hash(deposit_nullifiers_arr) == deposit_nullifiers_hash,
         "deposit nullifiers hash mismatch",
     );
     assert(
-        poseidon2_hash(withdrawal_claims) == withdrawal_claims_hash,
+        poseidon2_hash(withdrawal_claims_arr) == withdrawal_claims_hash,
         "withdrawal claims hash mismatch",
     );
-
-    BatchOutput {
-        old_state_root,
-        new_state_root,
-        nullifiers_root: nullifiers_batch_hash,
-        note_hashes_root: note_hashes_batch_hash,
-        deposit_nullifiers_hash,
-        withdrawal_claims_hash,
-        nullifier_tree_start_index: nullifier_tree_start_index,
-        note_hash_tree_start_index: note_hash_tree_start_index,
-    }
 }

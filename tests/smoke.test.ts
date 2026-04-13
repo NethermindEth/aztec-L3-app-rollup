@@ -36,7 +36,10 @@ import { computeTubeVkHash } from "./harness/prover.js";
 // -------------------------------------------------------------------------
 
 const NODE_URL = process.env.AZTEC_NODE_URL ?? "http://localhost:8080";
-const L3_ARTIFACT_PATH = resolve(import.meta.dirname ?? ".", "../target/l3_settlement-L3Settlement.json");
+const L3_ARTIFACT_PATH = resolve(
+  import.meta.dirname ?? ".",
+  "../target/l3_ivc_settlement-L3IvcSettlement.json",
+);
 
 function loadL3Artifact() {
   return loadContractArtifact(
@@ -155,7 +158,7 @@ async function main() {
   assert(root1.toString() === batch1.newStateRoot.toString(), "root after deposit");
   assert(nonce1.toString() === "1", "nonce=1");
   assert(batch1.depositCount === 1, "1 deposit");
-  assert(batch1.paddingCount === 31, "31 padding");
+  assert(batch1.paddingCount === 7, "7 padding (IVC batch size 8, 1 real tx)");
 
   const depositTreeIdx = batch1.noteInsertionIndices[0][0];
   assert(depositTreeIdx >= 0, "deposit note inserted");

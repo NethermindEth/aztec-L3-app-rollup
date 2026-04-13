@@ -19,16 +19,18 @@ import { readFileSync } from "fs";
 import { resolve } from "path";
 
 const NODE_URL = process.env.AZTEC_NODE_URL ?? "http://localhost:8080";
-const L3_ARTIFACT = resolve(import.meta.dirname ?? ".", "../target/l3_settlement-L3Settlement.json");
+const L3_ARTIFACT = resolve(
+  import.meta.dirname ?? ".",
+  "../target/l3_ivc_settlement-L3IvcSettlement.json",
+);
 
-// Constants matching the circuit.
+// Constants matching the IVC circuit (batch size 8).
 const ULTRA_HONK_VK_LENGTH = 115;
 const ULTRA_HONK_PROOF_LENGTH = 500;
 const BATCH_OUTPUT_FIELDS = 8;
-// NOTE: reduced to 4 for testing (Chonk ECCVM limit).
-const BATCH_NULLIFIERS_COUNT = 8;
-const BATCH_NOTE_HASHES_COUNT = 8;
-const MAX_BATCH_SIZE = 4;
+const BATCH_NULLIFIERS_COUNT = 16;
+const BATCH_NOTE_HASHES_COUNT = 16;
+const MAX_BATCH_SIZE = 8;
 
 async function main() {
   console.log("Connecting...");
@@ -45,7 +47,7 @@ async function main() {
   );
 
   // Deploy L3 with tube_vk_hash = 0 (we're testing whether it checks at all).
-  console.log("Deploying L3Settlement...");
+  console.log("Deploying L3IvcSettlement...");
   const l3Artifact = loadContractArtifact(
     JSON.parse(readFileSync(L3_ARTIFACT, "utf-8")) as NoirCompiledContract,
   );

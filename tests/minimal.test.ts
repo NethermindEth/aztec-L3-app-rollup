@@ -14,7 +14,10 @@ import { readFileSync } from "fs";
 import { resolve } from "path";
 
 const NODE_URL = process.env.AZTEC_NODE_URL ?? "http://localhost:8080";
-const L3_ARTIFACT = resolve(import.meta.dirname ?? ".", "../target/l3_settlement-L3Settlement.json");
+const L3_ARTIFACT = resolve(
+  import.meta.dirname ?? ".",
+  "../target/l3_ivc_settlement-L3IvcSettlement.json",
+);
 
 async function main() {
   console.log("1. Connecting...");
@@ -58,7 +61,7 @@ async function main() {
 
   // --- L3Settlement (our contract) ---
 
-  console.log("6. Deploying L3Settlement...");
+  console.log("6. Deploying L3IvcSettlement...");
   const l3Artifact = loadContractArtifact(
     JSON.parse(readFileSync(L3_ARTIFACT, "utf-8")) as NoirCompiledContract,
   );

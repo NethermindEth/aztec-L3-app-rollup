@@ -8,12 +8,34 @@ import { Fr } from "@aztec/aztec.js/fields";
 import { poseidon2Hash } from "@aztec/foundation/crypto/poseidon";
 
 const TREE_DEPTH = 20;
-// NOTE: reduced to 4 for testing (Chonk ECCVM limit). See circuits/types/src/lib.nr.
-const MAX_BATCH_SIZE = 4;
+// Per-tx layout constants are pipeline-independent.
 const MAX_NOTES_PER_TX = 2;
 const MAX_OUTPUTS_PER_TX = 2;
-const BATCH_NULLIFIERS_COUNT = 8; // MAX_BATCH_SIZE * MAX_NOTES_PER_TX
-const BATCH_NOTE_HASHES_COUNT = 8; // MAX_BATCH_SIZE * MAX_OUTPUTS_PER_TX
+
+// Batch size is pipeline-specific, so it is passed in by the caller
+// (see BatchSizing below). The IVC path uses 8, the Recursive path uses 16.
+export interface BatchSizing {
+  maxBatchSize: number;
+  batchNullifiersCount: number; // maxBatchSize * MAX_NOTES_PER_TX
+  batchNoteHashesCount: number; // maxBatchSize * MAX_OUTPUTS_PER_TX
+}
+
+// IVC pipeline bumped to batch=8 (experimental — verifies the Chonk ECCVM
+// 32768-row ceiling still holds headroom at 8×batch_app verifications).
+// Recursive pipeline also at sub-batch size 8; larger total batches are built
+// by aggregating multiple sub-batches via the pair_wrapper circuit (not yet
+// wired into this harness).
+export const IVC_BATCH_SIZING: BatchSizing = {
+  maxBatchSize: 8,
+  batchNullifiersCount: 16,
+  batchNoteHashesCount: 16,
+};
+
+export const RECURSIVE_BATCH_SIZING: BatchSizing = {
+  maxBatchSize: 8,
+  batchNullifiersCount: 16,
+  batchNoteHashesCount: 16,
+};
 
 // -------------------------------------------------------------------------
 // Async poseidon2 wrapper (foundation's poseidon2Hash returns a Promise)
@@ -282,13 +304,14 @@ export class TestL3State {
 
   async syncStateRoot() { this.stateRoot = await this.computeStateRoot(); }
 
-  async buildSettleInputs(entries: BatchEntry[]): Promise<SettleBatchInputs> {
-    const nullifiers = new Array<Fr>(BATCH_NULLIFIERS_COUNT).fill(Fr.ZERO);
-    const noteHashes = new Array<Fr>(BATCH_NOTE_HASHES_COUNT).fill(Fr.ZERO);
-    const depositNullifiers = new Array<Fr>(MAX_BATCH_SIZE).fill(Fr.ZERO);
-    const withdrawalClaims = new Array<Fr>(MAX_BATCH_SIZE).fill(Fr.ZERO);
+  async buildSettleInputs(entries: BatchEntry[], sizing: BatchSizing): Promise<SettleBatchInputs> {
+    const { maxBatchSize, batchNullifiersCount, batchNoteHashesCount } = sizing;
+    const nullifiers = new Array<Fr>(batchNullifiersCount).fill(Fr.ZERO);
+    const noteHashes = new Array<Fr>(batchNoteHashesCount).fill(Fr.ZERO);
+    const depositNullifiers = new Array<Fr>(maxBatchSize).fill(Fr.ZERO);
+    const withdrawalClaims = new Array<Fr>(maxBatchSize).fill(Fr.ZERO);
 
-    for (let i = 0; i < entries.length && i < MAX_BATCH_SIZE; i++) {
+    for (let i = 0; i < entries.length && i < maxBatchSize; i++) {
       const e = entries[i];
       nullifiers[i * MAX_NOTES_PER_TX] = e.nullifiers[0];
       nullifiers[i * MAX_NOTES_PER_TX + 1] = e.nullifiers[1];

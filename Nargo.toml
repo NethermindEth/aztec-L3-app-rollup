@@ -4,11 +4,21 @@ members = [
     "circuits/payment",
     "circuits/deposit",
     "circuits/withdraw",
+    "circuits/padding",
+
+    # IVC pipeline (batch size 8): batch_app -> init/tail/hiding kernels -> Chonk -> tube.
     "circuits/batch_app",
     "circuits/init_kernel",
     "circuits/tail_kernel",
     "circuits/hiding_kernel",
     "circuits/tube",
-    "circuits/padding",
-    "contract",
+    "contract_ivc",
+
+    # Recursive pipeline (batch size 8 per sub-batch): batch_app_standalone -> wrapper.
+    "circuits/batch_app_standalone",
+    "circuits/wrapper",
+    # Recursive aggregation: pair_wrapper merges 2 wrapper proofs into 1
+    # UltraHonk proof with batch=16 merged public outputs.
+    "circuits/pair_wrapper",
+    "contract_recursive",
 ]

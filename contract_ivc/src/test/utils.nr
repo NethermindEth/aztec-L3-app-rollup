@@ -1,4 +1,4 @@
-use crate::L3Settlement;
+use crate::L3IvcSettlement;
 use aztec::{
     protocol::{address::AztecAddress, hash::poseidon2_hash, traits::ToField},
     test::helpers::test_environment::TestEnvironment,
@@ -9,6 +9,11 @@ pub global TOKEN_NAME: str<31> = "TestToken0000000000000000000000";
 pub global TOKEN_SYMBOL: str<31> = "TT00000000000000000000000000000";
 pub global TOKEN_DECIMALS: u8 = 18;
 pub global INITIAL_SUPPLY: u128 = 1_000_000;
+
+// IVC pipeline batch sizes for test arrays. Keep in sync with main.nr globals.
+pub global MAX_BATCH_SIZE: u32 = 8;
+pub global BATCH_NULLIFIERS_COUNT: u32 = 16;
+pub global BATCH_NOTE_HASHES_COUNT: u32 = 16;
 
 // -----------------------------------------------------------------------
 // TestL3 -- wraps contract interaction for clean multi-step tests.
@@ -29,7 +34,7 @@ pub struct TestL3 {
 }
 
 impl TestL3 {
-    // Deploy Token + L3Settlement and return a ready-to-use test handle.
+    // Deploy Token + L3IvcSettlement and return a ready-to-use test handle.
     pub unconstrained fn setup() -> TestL3 {
         let mut env = TestEnvironment::new();
         let admin = env.create_light_account();
@@ -43,9 +48,9 @@ impl TestL3 {
         // Mint public supply.
         env.call_public(admin, Token::at(token).mint_to_public(admin, INITIAL_SUPPLY));
 
-        // Deploy L3Settlement (zero genesis root, zero tube VK hash).
-        let l3_init = L3Settlement::interface().constructor(0, 0);
-        let l3 = env.deploy("L3Settlement").with_public_initializer(admin, l3_init);
+        // Deploy L3IvcSettlement (zero genesis root, zero tube VK hash).
+        let l3_init = L3IvcSettlement::interface().constructor(0, 0);
+        let l3 = env.deploy("L3IvcSettlement").with_public_initializer(admin, l3_init);
 
         // Fund L3 contract with tokens for withdrawal payouts.
         env.call_public(admin, Token::at(token).mint_to_public(l3, INITIAL_SUPPLY));
@@ -62,15 +67,15 @@ impl TestL3 {
     pub unconstrained fn register_deposit(&mut self, deposit_hash: Field) {
         self.env.call_public(
             self.l3,
-            L3Settlement::at(self.l3).register_deposit_internal(deposit_hash),
+            L3IvcSettlement::at(self.l3).register_deposit_internal(deposit_hash),
         );
     }
 
     // Settle a batch containing deposits, transfers, and/or withdrawals.
     //
     // - deposit_nullifiers: non-zero entries are deposit hashes to consume
-    // - nullifiers: all 8 nullifiers (deposits + payments + withdrawals)
-    // - note_hashes: all 8 note hashes
+    // - nullifiers: all 16 nullifiers (deposits + payments + withdrawals)
+    // - note_hashes: all 16 note hashes
     // - withdrawal_claims: non-zero entries are claim hashes to register
     // - new_state_root: the synthetic post-batch root
     //
@@ -78,45 +83,35 @@ impl TestL3 {
     // and advances internal tracking.
     pub unconstrained fn settle(
         &mut self,
-        nullifiers: [Field; 8],
-        note_hashes: [Field; 8],
-        deposit_nullifiers: [Field; 4],
-        withdrawal_claims: [Field; 4],
+        nullifiers: [Field; BATCH_NULLIFIERS_COUNT],
+        note_hashes: [Field; BATCH_NOTE_HASHES_COUNT],
+        deposit_nullifiers: [Field; MAX_BATCH_SIZE],
+        withdrawal_claims: [Field; MAX_BATCH_SIZE],
         new_state_root: Field,
     ) {
-        let nullifiers_hash = poseidon2_hash(nullifiers);
-        let note_hashes_hash = poseidon2_hash(note_hashes);
-        let deposit_hash = poseidon2_hash(deposit_nullifiers);
-        let withdrawal_hash = poseidon2_hash(withdrawal_claims);
-
-        self.env.call_public(
-            self.l3,
-            L3Settlement::at(self.l3).settle_batch(
-                0,                   // tube_vk_hash
-                self.state_root,     // old_state_root
-                new_state_root,
-                nullifiers_hash,
-                note_hashes_hash,
-                deposit_hash,
-                withdrawal_hash,
-                self.null_idx,
-                self.nh_idx,
-                nullifiers,
-                note_hashes,
-                deposit_nullifiers,
-                withdrawal_claims,
-            ),
-        );
-
-        // Count insertions and advance tracking.
+        // Count insertions for tree index advancement.
         let mut null_count: Field = 0;
-        for i in 0..8 {
+        for i in 0..BATCH_NULLIFIERS_COUNT {
             if nullifiers[i] != 0 { null_count += 1; }
         }
         let mut nh_count: Field = 0;
-        for i in 0..8 {
+        for i in 0..BATCH_NOTE_HASHES_COUNT {
             if note_hashes[i] != 0 { nh_count += 1; }
         }
+
+        self.env.call_public(
+            self.l3,
+            L3IvcSettlement::at(self.l3).settle_batch(
+                self.state_root,     // old_state_root
+                new_state_root,
+                deposit_nullifiers,
+                withdrawal_claims,
+                null_count,
+                nh_count,
+                nullifiers,
+                note_hashes,
+            ),
+        );
 
         self.state_root = new_state_root;
         self.null_idx += null_count;
@@ -135,7 +130,7 @@ impl TestL3 {
 
         self.env.call_public(
             recipient,
-            L3Settlement::at(self.l3).claim_withdrawal(
+            L3IvcSettlement::at(self.l3).claim_withdrawal(
                 self.token, amount, recipient, salt, claim_hash,
             ),
         );
@@ -143,12 +138,12 @@ impl TestL3 {
 
     // Read the contract's latest root.
     pub unconstrained fn latest_root(self) -> Field {
-        self.env.view_public(L3Settlement::at(self.l3).get_latest_root())
+        self.env.view_public(L3IvcSettlement::at(self.l3).get_latest_root())
     }
 
     // Read the contract's batch nonce.
     pub unconstrained fn batch_nonce(self) -> Field {
-        self.env.view_public(L3Settlement::at(self.l3).get_batch_nonce())
+        self.env.view_public(L3IvcSettlement::at(self.l3).get_batch_nonce())
     }
 
     // Read a public token balance.

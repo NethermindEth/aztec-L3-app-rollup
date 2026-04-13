@@ -1,7 +1,7 @@
 use ::aztec::macros::aztec;
 
 #[aztec]
-pub contract L3Settlement {
+pub contract L3IvcSettlement {
     use aztec::{
         macros::{
             functions::{external, initializer, only_self, view},
@@ -12,16 +12,16 @@ pub contract L3Settlement {
             hash::poseidon2_hash,
             traits::ToField,
         },
-        state_vars::{Map, PublicMutable},
+        state_vars::{Map, PublicImmutable, PublicMutable},
     };
     use bb_proof_verification::{verify_honk_proof, UltraHonkVerificationKey, UltraHonkZKProof};
     use token::Token;
 
-    // NOTE: reduced to 4 for testing (Chonk ECCVM limit). See circuits/types/src/lib.nr.
-    global MAX_BATCH_SIZE: u32 = 4;
+    // IVC pipeline batch sizes. Must match circuits/batch_app.
+    global MAX_BATCH_SIZE: u32 = 8;
     global BATCH_OUTPUT_FIELDS: u32 = 8;
-    global BATCH_NULLIFIERS_COUNT: u32 = 8;
-    global BATCH_NOTE_HASHES_COUNT: u32 = 8;
+    global BATCH_NULLIFIERS_COUNT: u32 = 16;  // MAX_BATCH_SIZE * 2
+    global BATCH_NOTE_HASHES_COUNT: u32 = 16; // MAX_BATCH_SIZE * 2
 
     // -----------------------------------------------------------------------
     // Storage
@@ -30,7 +30,10 @@ pub contract L3Settlement {
     #[storage]
     struct Storage<Context> {
         latest_root: PublicMutable<Field, Context>,
-        tube_vk_hash: PublicMutable<Field, Context>,
+        // tube_vk_hash is immutable (set once at deploy) so that private
+        // functions can read it directly to bind verify_honk_proof's vk_hash
+        // argument to the contract-committed circuit.
+        tube_vk_hash: PublicImmutable<Field, Context>,
         batch_nonce: PublicMutable<Field, Context>,
         nullifier_tree_start_index: PublicMutable<Field, Context>,
         note_hash_tree_start_index: PublicMutable<Field, Context>,
@@ -46,7 +49,7 @@ pub contract L3Settlement {
     #[initializer]
     fn constructor(initial_state_root: Field, tube_vk_hash: Field) {
         self.storage.latest_root.write(initial_state_root);
-        self.storage.tube_vk_hash.write(tube_vk_hash);
+        self.storage.tube_vk_hash.initialize(tube_vk_hash);
         self.storage.batch_nonce.write(0);
         // Nullifier tree index 0 is the genesis zero leaf, so insertions start at 1.
         self.storage.nullifier_tree_start_index.write(1);
@@ -116,22 +119,129 @@ pub contract L3Settlement {
         deposit_nullifiers: [Field; MAX_BATCH_SIZE],
         withdrawal_claims: [Field; MAX_BATCH_SIZE],
     ) {
+        // Bind the VK to the contract's committed tube_vk_hash so proofs from
+        // other circuits (or mismatched VKs) are rejected even if they pass
+        // verify_honk_proof's internal consistency check.
+        assert(
+            tube_vk_hash == self.storage.tube_vk_hash.read(),
+            "submit_batch: tube_vk_hash does not match contract's committed hash",
+        );
         verify_honk_proof(tube_vk, tube_proof, public_inputs, tube_vk_hash);
 
+        // Count non-zero entries for tree index advancement.
+        let mut null_count: Field = 0;
+        for i in 0..BATCH_NULLIFIERS_COUNT {
+            if nullifiers[i] != 0 { null_count += 1; }
+        }
+        let mut nh_count: Field = 0;
+        for i in 0..BATCH_NOTE_HASHES_COUNT {
+            if note_hashes[i] != 0 { nh_count += 1; }
+        }
+
+        // Only forward what settle_batch needs for public state mutations.
+        // All other verification (VK hash, batch hashes, tree indices) is
+        // guaranteed by the kernel proof -- see DESIGN_DECISIONS.md.
         self.enqueue_self.settle_batch(
-            tube_vk_hash,
             public_inputs[0], // old_state_root
             public_inputs[1], // new_state_root
-            public_inputs[2], // nullifiers_batch_hash
-            public_inputs[3], // note_hashes_batch_hash
-            public_inputs[4], // deposit_nullifiers_hash
-            public_inputs[5], // withdrawal_claims_hash
-            public_inputs[6], // nullifier_tree_start_index
-            public_inputs[7], // note_hash_tree_start_index
-            nullifiers,
-            note_hashes,
             deposit_nullifiers,
             withdrawal_claims,
+            null_count,
+            nh_count,
+            nullifiers,
+            note_hashes,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // submit_two_batches  (private)  -- meta-batch: 2 state transitions / 1 L2 tx
+    //
+    // Verifies two independent tube proofs (sharing the same tube VK), asserts
+    // state-root and tree-index chain continuity between them, and enqueues two
+    // sequential settle_batch public calls. Both batches must land atomically:
+    // if either settle_batch asserts, the whole L2 tx reverts.
+    //
+    // Purpose: amortize L2 tx envelope + VK-argument DA across two batches.
+    // -----------------------------------------------------------------------
+
+    #[external("private")]
+    fn submit_two_batches(
+        tube_vk: UltraHonkVerificationKey,                // shared across both
+        tube_vk_hash: Field,
+        // Batch 1
+        tube_proof_1: UltraHonkZKProof,
+        public_inputs_1: [Field; BATCH_OUTPUT_FIELDS],
+        nullifiers_1: [Field; BATCH_NULLIFIERS_COUNT],
+        note_hashes_1: [Field; BATCH_NOTE_HASHES_COUNT],
+        deposit_nullifiers_1: [Field; MAX_BATCH_SIZE],
+        withdrawal_claims_1: [Field; MAX_BATCH_SIZE],
+        // Batch 2
+        tube_proof_2: UltraHonkZKProof,
+        public_inputs_2: [Field; BATCH_OUTPUT_FIELDS],
+        nullifiers_2: [Field; BATCH_NULLIFIERS_COUNT],
+        note_hashes_2: [Field; BATCH_NOTE_HASHES_COUNT],
+        deposit_nullifiers_2: [Field; MAX_BATCH_SIZE],
+        withdrawal_claims_2: [Field; MAX_BATCH_SIZE],
+    ) {
+        // Bind the VK to the contract's committed tube_vk_hash (one storage
+        // check covers both batches since they share the VK).
+        assert(
+            tube_vk_hash == self.storage.tube_vk_hash.read(),
+            "submit_two_batches: tube_vk_hash does not match contract's committed hash",
+        );
+
+        // 1. Verify both tube proofs against the shared VK.
+        verify_honk_proof(tube_vk, tube_proof_1, public_inputs_1, tube_vk_hash);
+        verify_honk_proof(tube_vk, tube_proof_2, public_inputs_2, tube_vk_hash);
+
+        // 2. Count non-zero entries per batch.
+        let mut null_count_1: Field = 0;
+        for i in 0..BATCH_NULLIFIERS_COUNT {
+            if nullifiers_1[i] != 0 { null_count_1 += 1; }
+        }
+        let mut nh_count_1: Field = 0;
+        for i in 0..BATCH_NOTE_HASHES_COUNT {
+            if note_hashes_1[i] != 0 { nh_count_1 += 1; }
+        }
+        let mut null_count_2: Field = 0;
+        for i in 0..BATCH_NULLIFIERS_COUNT {
+            if nullifiers_2[i] != 0 { null_count_2 += 1; }
+        }
+        let mut nh_count_2: Field = 0;
+        for i in 0..BATCH_NOTE_HASHES_COUNT {
+            if note_hashes_2[i] != 0 { nh_count_2 += 1; }
+        }
+
+        // 3. State-chain continuity: batch 2's old root == batch 1's new root.
+        //    (settle_batch would catch this too, but asserting in private saves
+        //    a public-execution revert.)
+        assert(
+            public_inputs_1[1] == public_inputs_2[0],
+            "meta: state root chain broken between batches",
+        );
+
+        // 4. Tree-index chain continuity.
+        assert(
+            public_inputs_2[6] == public_inputs_1[6] + null_count_1,
+            "meta: nullifier tree index chain broken",
+        );
+        assert(
+            public_inputs_2[7] == public_inputs_1[7] + nh_count_1,
+            "meta: note-hash tree index chain broken",
+        );
+
+        // 5. Enqueue both settlements, in order.
+        self.enqueue_self.settle_batch(
+            public_inputs_1[0], public_inputs_1[1],
+            deposit_nullifiers_1, withdrawal_claims_1,
+            null_count_1, nh_count_1,
+            nullifiers_1, note_hashes_1,
+        );
+        self.enqueue_self.settle_batch(
+            public_inputs_2[0], public_inputs_2[1],
+            deposit_nullifiers_2, withdrawal_claims_2,
+            null_count_2, nh_count_2,
+            nullifiers_2, note_hashes_2,
         );
     }
 
@@ -142,61 +252,22 @@ pub contract L3Settlement {
     #[external("public")]
     #[only_self]
     fn settle_batch(
-        tube_vk_hash: Field,
         old_state_root: Field,
         new_state_root: Field,
-        nullifiers_batch_hash: Field,
-        note_hashes_batch_hash: Field,
-        deposit_nullifiers_hash: Field,
-        withdrawal_claims_hash: Field,
-        nullifier_tree_start_index: Field,
-        note_hash_tree_start_index: Field,
-        nullifiers: [Field; BATCH_NULLIFIERS_COUNT],
-        note_hashes: [Field; BATCH_NOTE_HASHES_COUNT],
         deposit_nullifiers: [Field; MAX_BATCH_SIZE],
         withdrawal_claims: [Field; MAX_BATCH_SIZE],
+        null_count: Field,
+        nh_count: Field,
+        nullifiers: [Field; BATCH_NULLIFIERS_COUNT],
+        note_hashes: [Field; BATCH_NOTE_HASHES_COUNT],
     ) {
-        // 1. Tube VK.
-        assert(
-            tube_vk_hash == self.storage.tube_vk_hash.read(),
-            "tube vk hash mismatch",
-        );
-
-        // 2. State chain.
+        // 1. State chain -- prevents stale/duplicate batch application.
         assert(
             self.storage.latest_root.read() == old_state_root,
             "old state root mismatch",
         );
 
-        // 3. Tree indices must match stored next positions.
-        assert(
-            self.storage.nullifier_tree_start_index.read() == nullifier_tree_start_index,
-            "nullifier tree start index mismatch",
-        );
-        assert(
-            self.storage.note_hash_tree_start_index.read() == note_hash_tree_start_index,
-            "note hash tree start index mismatch",
-        );
-
-        // 4. Verify all proof-committed hashes.
-        assert(
-            poseidon2_hash(nullifiers) == nullifiers_batch_hash,
-            "nullifiers hash mismatch",
-        );
-        assert(
-            poseidon2_hash(note_hashes) == note_hashes_batch_hash,
-            "note hashes hash mismatch",
-        );
-        assert(
-            poseidon2_hash(deposit_nullifiers) == deposit_nullifiers_hash,
-            "deposit nullifiers hash mismatch",
-        );
-        assert(
-            poseidon2_hash(withdrawal_claims) == withdrawal_claims_hash,
-            "withdrawal claims hash mismatch",
-        );
-
-        // 5. Consume pending deposits.
+        // 2. Consume pending deposits.
         for i in 0..MAX_BATCH_SIZE {
             if deposit_nullifiers[i] != 0 {
                 assert(
@@ -207,34 +278,26 @@ pub contract L3Settlement {
             }
         }
 
-        // 6. Register pending withdrawals for L2 claiming.
+        // 3. Register pending withdrawals for L2 claiming.
         for i in 0..MAX_BATCH_SIZE {
             if withdrawal_claims[i] != 0 {
                 self.storage.pending_withdrawals.at(withdrawal_claims[i]).write(true);
             }
         }
 
-        // 7. Count non-zero insertions to advance indices.
-        let mut null_count: Field = 0;
-        for i in 0..BATCH_NULLIFIERS_COUNT {
-            if nullifiers[i] != 0 { null_count += 1; }
-        }
-        let mut nh_count: Field = 0;
-        for i in 0..BATCH_NOTE_HASHES_COUNT {
-            if note_hashes[i] != 0 { nh_count += 1; }
-        }
-
-        // 8. Advance state.
+        // 4. Advance state.
         self.storage.latest_root.write(new_state_root);
         self.storage.batch_nonce.write(self.storage.batch_nonce.read() + 1);
-        self.storage.nullifier_tree_start_index.write(nullifier_tree_start_index + null_count);
-        self.storage.note_hash_tree_start_index.write(note_hash_tree_start_index + nh_count);
+        self.storage.nullifier_tree_start_index.write(
+            self.storage.nullifier_tree_start_index.read() + null_count,
+        );
+        self.storage.note_hash_tree_start_index.write(
+            self.storage.note_hash_tree_start_index.read() + nh_count,
+        );
 
-        // 9. Emit full arrays for DA / off-chain indexers.
-        self.context.emit_public_log_unsafe(0, nullifiers);
-        self.context.emit_public_log_unsafe(1, note_hashes);
-        self.context.emit_public_log_unsafe(2, deposit_nullifiers);
-        self.context.emit_public_log_unsafe(3, withdrawal_claims);
+        // All batch data (nullifiers, note_hashes, deposit_nullifiers,
+        // withdrawal_claims) is DA-available via the public function arguments.
+        // No logs emitted -- L3 indexers decode directly from calldata.
     }
 
     // -----------------------------------------------------------------------

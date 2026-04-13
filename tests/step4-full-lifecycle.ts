@@ -1,4 +1,16 @@
 /**
+ * !!! NEEDS VERIFICATION AFTER IVC/RECURSIVE SPLIT !!!
+ *
+ * After the pipeline split (IVC batch size 8 / Recursive batch size 16) this
+ * end-to-end test has not yet been re-run. The Noir unit tests in
+ * contract_ivc/src/test pass at batch=8, and the circuits + contract compile
+ * cleanly, but a full sandbox run of this script needs to be verified to
+ * confirm that:
+ *   - buildBatchProof (prover.ts) at batch=8 works with the new IVC constants,
+ *   - the IVC contract (l3_ivc_settlement-L3IvcSettlement.json) deploys and
+ *     accepts submit_batch with the larger nullifier / note-hash arrays,
+ *   - submitFullBatch's paddingCount === 7 assertion holds for single-tx batches.
+ *
  * Full e2e lifecycle with continuous note lineage and real ZK proofs.
  *
  * Continuous note lineage (one note flows through every stage):
@@ -9,7 +21,7 @@
  *
  * Every proof is real:
  *   - Per-tx UltraHonk proofs (deposit, payment, withdraw)
- *   - Padding proofs fill remaining 31 batch slots
+ *   - Padding proofs fill remaining 7 batch slots (IVC batch size 8)
  *   - batch_app circuit with Merkle insertion witnesses
  *   - IVC kernel chain (init -> tail -> hiding)
  *   - Chonk proof via AztecClientBackend
@@ -58,7 +70,7 @@ import {
 const NODE_URL = process.env.AZTEC_NODE_URL ?? "http://localhost:8080";
 const L3_ARTIFACT_PATH = resolve(
   import.meta.dirname ?? ".",
-  "../target/l3_settlement-L3Settlement.json",
+  "../target/l3_ivc_settlement-L3IvcSettlement.json",
 );
 
 function assert(cond: boolean, msg: string) {
@@ -254,7 +266,7 @@ async function main() {
 
   assert((await view(l3.methods.get_batch_nonce(), admin)) === 1n, "nonce=1");
   assert(batch1.depositCount === 1, "1 deposit in batch");
-  assert(batch1.paddingCount === 3, "3 padding in batch");
+  assert(batch1.paddingCount === 7, "7 padding in batch (IVC batch size 8, 1 real tx)");
 
   // Track Alice's new L3 note.
   const aliceNoteIdx = batch1.noteInsertionIndices[0][0];
@@ -510,7 +522,7 @@ async function main() {
   // insertions from the original state. This is tracked as future work.
   //
   // The contract-level multi-tx logic IS tested by the Noir unit tests
-  // in contract/src/test/lifecycle.nr (synthetic batches with multiple txs).
+  // in contract_ivc/src/test/lifecycle.nr (synthetic batches with multiple txs).
   // =====================================================================
   console.log("=== Step 9: Multi-tx batch (skipped -- see comment) ===\n");
 
