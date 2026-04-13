@@ -1,7 +1,7 @@
 /**
  * !!! NEEDS VERIFICATION AFTER IVC/RECURSIVE SPLIT !!!
  *
- * After the pipeline split (IVC batch size 8 / Recursive batch size 16) this
+ * After the pipeline split (both pipelines at batch size 8) this
  * end-to-end test has not yet been re-run. The Noir unit tests in
  * contract_ivc/src/test pass at batch=8, and the circuits + contract compile
  * cleanly, but a full sandbox run of this script needs to be verified to

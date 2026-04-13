@@ -13,7 +13,7 @@ const MAX_NOTES_PER_TX = 2;
 const MAX_OUTPUTS_PER_TX = 2;
 
 // Batch size is pipeline-specific, so it is passed in by the caller
-// (see BatchSizing below). The IVC path uses 8, the Recursive path uses 16.
+// (see BatchSizing below). Both pipelines currently use 8.
 export interface BatchSizing {
   maxBatchSize: number;
   batchNullifiersCount: number; // maxBatchSize * MAX_NOTES_PER_TX

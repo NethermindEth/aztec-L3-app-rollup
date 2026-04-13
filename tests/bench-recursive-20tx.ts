@@ -1,7 +1,7 @@
 /**
  * Single-batch e2e benchmark for the recursive UltraHonk pipeline.
  *
- * All transactions are deposits, proved in a single batch of MAX_BATCH_SIZE (16).
+ * All transactions are deposits, proved in a single batch of MAX_BATCH_SIZE (8).
  * This fills the recursive path's circuit to its compiled capacity.
  *
  * Flow:

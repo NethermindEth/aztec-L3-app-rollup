@@ -28,11 +28,11 @@ import {
 const TARGET_DIR = resolve(import.meta.dirname ?? ".", "../../target");
 // Recursive pipeline batch sizes. Must match circuits/batch_app_standalone/src/main.nr
 // globals and contract_recursive/src/main.nr. No ECCVM bottleneck (standalone UltraHonk).
-const MAX_BATCH_SIZE = RECURSIVE_BATCH_SIZING.maxBatchSize;         // 16
+const MAX_BATCH_SIZE = RECURSIVE_BATCH_SIZING.maxBatchSize;         // 8
 const MAX_NOTES_PER_TX = 2;
 const MAX_OUTPUTS_PER_TX = 2;
-const BATCH_NULLIFIERS_COUNT = RECURSIVE_BATCH_SIZING.batchNullifiersCount;   // 32
-const BATCH_NOTE_HASHES_COUNT = RECURSIVE_BATCH_SIZING.batchNoteHashesCount;  // 32
+const BATCH_NULLIFIERS_COUNT = RECURSIVE_BATCH_SIZING.batchNullifiersCount;   // 16
+const BATCH_NOTE_HASHES_COUNT = RECURSIVE_BATCH_SIZING.batchNoteHashesCount;  // 16
 
 // Proof / VK field lengths (shared across buildBatchProofRecursive and buildPairWrapperProof).
 const VK_FIELDS = 115;
