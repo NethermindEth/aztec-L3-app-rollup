@@ -51,7 +51,7 @@ async function main() {
   const l3Artifact = loadContractArtifact(
     JSON.parse(readFileSync(L3_ARTIFACT, "utf-8")) as NoirCompiledContract,
   );
-  const { contract: l3 } = await Contract.deploy(wallet, l3Artifact, [0n, 0n], "constructor")
+  const { contract: l3 } = await Contract.deploy(wallet, l3Artifact, [0n, 0n, 0n], "constructor")
     .send({ from: admin });
   console.log(`L3: ${l3.address}\n`);
 
@@ -104,6 +104,39 @@ async function main() {
     const msg = e.message?.slice(0, 300) ?? String(e);
     console.log(`  RESULT: failed\n  ${msg}\n`);
   }
+
+  // --- Probe 4: Shape-boundary test ---
+  // The contract ABI declares tube_proof as [Field; 500] (UltraHonkZKProof).
+  // Tube proofs from the IVC pipeline are 519 fields (RollupHonk with IPA).
+  // This probe tests how the SDK handles mismatched array lengths.
+  console.log("=== Probe 4: Shape-boundary test (proof array lengths) ===");
+  const testLengths = [499, 500, 501, 519];
+  for (const len of testLengths) {
+    const proofArr = new Array(len).fill(0n);
+    try {
+      await l3.methods.submit_batch(
+        zeroVk, proofArr, zeroPublicInputs, 0n,
+        zeroNullifiers, zeroNoteHashes, zeroDeposits, zeroWithdrawals,
+      ).send({ from: admin });
+      console.log(`  proof[${len}]: ACCEPTED`);
+    } catch (e: any) {
+      const msg = (e.message ?? String(e)).slice(0, 150);
+      // Distinguish SDK/ABI errors from kernel/execution errors
+      const isAbiError = msg.includes("abi") || msg.includes("encode") ||
+                         msg.includes("length") || msg.includes("size") ||
+                         msg.includes("array") || msg.includes("expected");
+      const label = isAbiError ? "REJECTED (ABI/SDK layer)" : "REJECTED (kernel/execution)";
+      console.log(`  proof[${len}]: ${label}`);
+      console.log(`    ${msg}`);
+    }
+  }
+  console.log();
+
+  // Interpretation guide:
+  console.log("Interpretation:");
+  console.log("  If 499 rejected, 500 accepted, 501/519 rejected => SDK enforces exact length");
+  console.log("  If 499 rejected, 500/501/519 all accepted      => SDK truncates/pads silently");
+  console.log("  If all accepted                                 => no array length enforcement\n");
 
   console.log("Done.");
 }

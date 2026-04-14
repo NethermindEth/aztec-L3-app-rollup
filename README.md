@@ -1,5 +1,7 @@
 # Aztec L3 Payment Rollup
 
+> **Proof verification limitation.** The Aztec sandbox (`PXE_PROVER=none`) does not enforce `verify_honk_proof` calls in contract private functions — the opcode is a no-op during ACIR simulation. Additionally, `UltraHonkBackend` generates 519-field `noir-rollup` proofs, but contract ABIs declare 500-field `UltraHonkZKProof` parameters; the SDK silently truncates the excess. All client-side proving and recursive aggregation is sound, but **on-chain proof verification is not enforced** on the current Aztec version. This is a platform limitation, not a bug in this repo. See [`SILENT_FAILURE_REVIEW.md`](./SILENT_FAILURE_REVIEW.md) for full details and empirical evidence.
+
 A ZK payment rollup that settles on Aztec L2 with real proofs end-to-end.
 
 **Both proving pipelines in this repo process the same batch size:**
@@ -61,14 +63,16 @@ No IVC kernels, no Chonk, no `AztecClientBackend`. The circuit compiles linearly
 
 Both pipelines support combining **two 8-slot sub-batches into one L2 transaction** (16 slot capacity per L2 tx):
 
-- **IVC meta-batch** (`submit_two_batches`): two independent tube proofs verified in one L2 tx, two `settle_batch` calls. No new circuit.
-- **Recursive merged-proof** (`submit_merged_batch` + `pair_wrapper`): a new aggregator circuit recursively verifies two wrapper proofs → one merged UltraHonk proof, one `settle_batch_merged` call.
+- **Design A — IVC meta-batch** (`submit_two_batches`): two independent tube proofs verified in one L2 tx, two `settle_batch` calls. No new circuit.
+- **Design B — Recursive merged-proof** (`submit_merged_batch` + `pair_wrapper`): a new aggregator circuit recursively verifies two wrapper proofs → one merged UltraHonk proof, one `settle_batch_merged` call.
+- **Path C — IVC + RollupHonk aggregation** (`submit_merged_batch` + `pair_tube`): IVC sub-batches (fast, concurrent-friendly at ~4 GiB each) aggregated by `pair_tube` into a single merged proof. Uses `verify_rolluphonk_proof` to handle IPA material from tube proofs. Gets Design B's DA savings (~42% reduction) with Design A's proving speed.
 
-End-to-end tests for both:
+End-to-end tests for all three:
 
 ```sh
-npx tsx tests/step8-ivc-meta-16slot.ts       # IVC meta-batch (Design A)
-npx tsx tests/step9-recursive-merged-16slot.ts  # Recursive merged-proof (Design B)
+npx tsx tests/step8-ivc-meta-16slot.ts         # Design A: IVC meta-batch
+npx tsx tests/step9-recursive-merged-16slot.ts  # Design B: Recursive merged-proof
+npx tsx tests/step10-ivc-merged-16slot.ts       # Path C: IVC + pair_tube aggregation
 ```
 
 See [`BATCHING_OF_BATCHES.md`](./BATCHING_OF_BATCHES.md) for architecture diagrams, reproduction steps, and side-by-side cost comparison.
@@ -115,8 +119,9 @@ export PATH="$HOME/.aztec/current/bin:$HOME/.aztec/current/node_modules/.bin:$PA
 # and strips internal function-name prefixes:
 aztec compile --workspace --force
 
-# pair_wrapper is a standalone bin crate (not a contract):
+# pair_wrapper and pair_tube are standalone bin crates (not contracts):
 cd circuits/pair_wrapper && nargo compile && cd ../..
+cd circuits/pair_tube && nargo compile && cd ../..
 ```
 
 Expected `target/` contents:
@@ -126,6 +131,7 @@ Expected `target/` contents:
 | `l3_deposit.json`, `l3_payment.json`, `l3_withdraw.json`, `l3_padding.json` | Shared (per-tx) |
 | `l3_batch_app.json`, `l3_init_kernel.json`, `l3_tail_kernel.json`, `l3_hiding_kernel.json`, `l3_tube.json` | IVC |
 | `l3_batch_app_standalone.json`, `l3_wrapper.json`, `l3_pair_wrapper.json` | Recursive |
+| `l3_pair_tube.json` | Path C (IVC + RollupHonk aggregation) |
 | `l3_ivc_settlement-L3IvcSettlement.json` | IVC contract |
 | `l3_recursive_settlement-L3RecursiveSettlement.json` | Recursive contract |
 | `token_contract-Token.json` | Token (L2 dep) |
@@ -237,18 +243,22 @@ circuits/
   # Recursive pipeline (batch size 8)
   batch_app_standalone/  Aggregates 8 txs, explicit pub outputs (no databus)
   wrapper/               Verifies batch_app_standalone UltraHonk proof for L2
-  pair_wrapper/          Aggregates 2 wrapper proofs -> 1 merged UltraHonk proof
-                         (used by the recursive merged-proof e2e test)
+  pair_wrapper/          Aggregates 2 UltraHonk wrapper proofs -> 1 merged proof
+
+  # Path C: IVC + RollupHonk aggregation
+  pair_tube/             Aggregates 2 RollupHonk tube proofs -> 1 merged proof
+                         (uses verify_rolluphonk_proof, handles IPA material)
 
 contract_ivc/            L3IvcSettlement (batch size 8), Noir unit tests
-                         Methods: submit_batch, submit_two_batches
+                         Methods: submit_batch, submit_two_batches, submit_merged_batch
 contract_recursive/      L3RecursiveSettlement (batch size 8), Noir unit tests
                          Methods: submit_batch, submit_merged_batch, settle_batch_merged
 
 tests/
   harness/
     state.ts                         Shared state model, parameterized batch sizing
-    prover.ts                        IVC prover (buildBatchProof, computeTubeVkHash)
+    prover.ts                        IVC prover (buildBatchProof, computeTubeVkHash,
+                                     buildPairTubeProof, computePairTubeVkHash)
     prover-recursive.ts              Recursive prover (buildBatchProofRecursive,
                                      buildPairWrapperProof, computePairWrapperVkHash)
     actions.ts                       High-level IVC test actions
@@ -256,6 +266,7 @@ tests/
   step5-recursive-poc.ts                Recursive e2e test (single-batch)
   step8-ivc-meta-16slot.ts              Design A: IVC meta-batch (see BATCHING_OF_BATCHES.md)
   step9-recursive-merged-16slot.ts      Design B: Recursive merged-proof
+  step10-ivc-merged-16slot.ts           Path C: IVC + pair_tube RollupHonk aggregation
   bench-recursive-20tx.ts,
   bench-recursive-100tx.ts              Recursive throughput benchmarks
 ```

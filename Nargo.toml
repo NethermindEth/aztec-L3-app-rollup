@@ -20,5 +20,8 @@ members = [
     # Recursive aggregation: pair_wrapper merges 2 wrapper proofs into 1
     # UltraHonk proof with batch=16 merged public outputs.
     "circuits/pair_wrapper",
+    # Path C: pair_tube merges 2 IVC tube proofs (RollupHonk, 519 fields)
+    # into 1 merged proof via verify_rolluphonk_proof.
+    "circuits/pair_tube",
     "contract_recursive",
 ]

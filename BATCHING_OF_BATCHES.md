@@ -1,13 +1,14 @@
 # Batching-of-Batches on Aztec L3
 
-> Two ways to settle **16 L3 transactions in one L2 transaction**, with side-by-side measurements.
+> Three ways to settle **16 L3 transactions in one L2 transaction**, with side-by-side measurements.
 
-Both paths in this repo handle the **same total capacity per L2 tx: 16 L3 tx slots** (processed as 2 independent sub-batches of 8). They differ in how the two sub-batches are combined into a single L2 submission:
+All three paths in this repo handle the **same total capacity per L2 tx: 16 L3 tx slots** (processed as 2 independent sub-batches of 8). They differ in how the two sub-batches are combined into a single L2 submission:
 
 - **Design A — IVC meta-batch** sends **two proofs** in one L2 tx (no aggregation).
-- **Design B — Recursive merged-proof** aggregates both sub-batches into **one proof** via a new `pair_wrapper` circuit, then sends that.
+- **Design B — Recursive merged-proof** aggregates both sub-batches into **one proof** via `pair_wrapper` (verifies UltraHonk wrapper proofs).
+- **Path C — IVC + RollupHonk aggregation** aggregates both sub-batches into **one proof** via `pair_tube` (verifies RollupHonk tube proofs with IPA material using `verify_rolluphonk_proof`). Combines IVC's fast proving with Design B's DA savings.
 
-Both designs ship as end-to-end tests you can run yourself (`step8-*` and `step9-*`) to reproduce the measurements.
+All three ship as end-to-end tests you can run yourself (`step8-*`, `step9-*`, `step10-*`) to reproduce the measurements.
 
 ---
 
@@ -398,19 +399,21 @@ Without this binding, `verify_honk_proof` only enforces internal `vk`/`vk_hash` 
 
 | File | Role |
 |---|---|
-| `circuits/pair_wrapper/{Nargo.toml,src/main.nr}` | **New**: aggregator circuit (verifies 2 wrappers → 1 merged proof) |
+| `circuits/pair_wrapper/{Nargo.toml,src/main.nr}` | Design B aggregator (verifies 2 UltraHonk wrapper proofs → 1 merged proof) |
+| `circuits/pair_tube/{Nargo.toml,src/main.nr}` | Path C aggregator (verifies 2 RollupHonk tube proofs → 1 merged proof via `verify_rolluphonk_proof`) |
 | `circuits/batch_app_standalone/src/main.nr` | Recursive sub-batch circuit (`MAX_BATCH_SIZE = 8`) |
 | `circuits/wrapper/src/main.nr` | Verifies `batch_app_standalone`; verifier target selected at prove time |
 | `circuits/batch_app/src/main.nr` | IVC sub-batch circuit (`MAX_BATCH_SIZE = 8`) |
 | `circuits/{init,tail,hiding}_kernel/`, `circuits/tube/` | IVC kernels + rollup-target compressor |
-| `contract_ivc/src/main.nr` | `L3IvcSettlement`: `submit_batch`, `submit_two_batches` |
-| `contract_recursive/src/main.nr` | `L3RecursiveSettlement`: `submit_batch`, **new** `submit_merged_batch`, **new** `settle_batch_merged` |
-| `tests/harness/prover.ts` | IVC prover (`buildBatchProof`, `computeTubeVkHash`) |
-| `tests/harness/prover-recursive.ts` | Recursive prover (`buildBatchProofRecursive`, **new** `buildPairWrapperProof`, **new** `computePairWrapperVkHash`) |
+| `contract_ivc/src/main.nr` | `L3IvcSettlement`: `submit_batch`, `submit_two_batches`, `submit_merged_batch` (Path C) |
+| `contract_recursive/src/main.nr` | `L3RecursiveSettlement`: `submit_batch`, `submit_merged_batch`, `settle_batch_merged` |
+| `tests/harness/prover.ts` | IVC prover (`buildBatchProof`, `computeTubeVkHash`, `buildPairTubeProof`, `computePairTubeVkHash`) |
+| `tests/harness/prover-recursive.ts` | Recursive prover (`buildBatchProofRecursive`, `buildPairWrapperProof`, `computePairWrapperVkHash`) |
 | `tests/harness/state.ts` | `TestL3State` + shared batch sizings (both `IVC_BATCH_SIZING` and `RECURSIVE_BATCH_SIZING` at 8/16/16) |
 | `tests/step8-ivc-meta-16slot.ts` | **Design A e2e test** |
 | `tests/step9-recursive-merged-16slot.ts` | **Design B e2e test** |
-| `target/step8-metrics.json`, `target/step9-metrics.json` | Metrics JSON written by each run |
+| `tests/step10-ivc-merged-16slot.ts` | **Path C e2e test** (IVC sub-batches + pair_tube RollupHonk aggregation) |
+| `target/step8-metrics.json`, `target/step9-metrics.json`, `target/step10-metrics.json` | Metrics JSON written by each run |
 
 ---
 
@@ -418,7 +421,7 @@ Without this binding, `verify_honk_proof` only enforces internal `vk`/`vk_hash` 
 
 1. **1 real tx per sub-batch + 7 padding**. The tests use 16 slot capacity but ship 2 real + 14 padding (1 real per sub-batch). The prover harness generates per-tx proofs against a single state snapshot, which only works for the first tx in each batch. Multi-real-tx-per-batch needs intermediate state roots (a separate refactor — see `DESIGN_DECISIONS.md` and the skip note in `step4-full-lifecycle.ts`). The **circuits** already support multi-tx; the Noir unit tests in both contracts exercise it with synthetic state.
 
-2. **Sandbox `realProofs: false`**. The sandbox disables the outer **rollup proof** (over a whole L2 block) but **not** private-kernel proof verification, which is what enforces the `verify_honk_proof` calls in submit methods. Coverage was confirmed by `step4-full-lifecycle.ts`'s corrupt-proof probe, which the sandbox correctly rejects.
+2. **Sandbox proof-verification gap**. Earlier drafts assumed the sandbox still enforced private-kernel `verify_honk_proof` calls. The newer probe suite (`step2-submit-batch-probe.ts`, plus the tail-corruption checks in `step4-full-lifecycle.ts`) shows that in the default sandbox mode (`PXE_PROVER=none`), corrupted or fabricated proofs can still be accepted, while plain Noir `assert` checks still fire. These e2e tests therefore validate contract logic and plumbing, not proof soundness.
 
 3. **Gas-receipt surfacing**. The Aztec.js version in 4.2.0-nightly.20260408 doesn't expose `gasUsed` from `.send()`. Public execution cost is reasoned structurally (loop bounds in `settle_batch*`). Adding real gas figures is a drop-in follow-up via `node.getTxReceipt(txHash)`.
 
@@ -428,9 +431,80 @@ Without this binding, `verify_honk_proof` only enforces internal `vk`/`vk_hash` 
 
 ---
 
+## Path C — IVC sub-batches + pair_tube RollupHonk aggregation
+
+A third approach that combines the fast IVC sub-batch proving (~4 GiB RAM per sub-batch, highly concurrent-friendly) with DA-efficient proof aggregation via a new `pair_tube` circuit.
+
+```
+sub-batch 1 (8 slots) ──► IVC pipeline ──► tube proof₁ [RollupHonk, 519 fields] ──┐
+                                                                                    │
+                                                                                    ├──► pair_tube ──► 1 merged RollupHonk proof
+                                                                                    │                        │
+sub-batch 2 (8 slots) ──► IVC pipeline ──► tube proof₂ [RollupHonk, 519 fields] ──┘                        ↓
+                                                                                           submit_merged_batch (L3IvcSettlement)
+                                                                                                        │
+                                                                                           settle_batch_merged (batch=16)
+                                                                                           One Aztec L2 tx, nonce += 1
+```
+
+### How it works
+
+Tube proofs are RollupHonk proofs (519 fields) carrying IPA accumulation material from the Chonk compression step. Standard `verify_honk_proof` (which expects `noir-recursive` UltraHonk, 500 fields) cannot verify them — this was the initial blocker.
+
+The solution uses `verify_rolluphonk_proof` from `bb_proof_verification`, which is designed for in-circuit verification of RollupHonk proofs (`PROOF_TYPE_ROLLUP_HONK = 4`). The `pair_tube` circuit is structurally identical to `pair_wrapper` but uses the RollupHonk types:
+
+| | `pair_wrapper` (Design B) | `pair_tube` (Path C) |
+|---|---|---|
+| Verifier function | `verify_honk_proof` | `verify_rolluphonk_proof` |
+| Proof type | `UltraHonkZKProof` (500 fields) | `RollupHonkProof` (519 fields) |
+| VK type | `UltraHonkVerificationKey` (115 fields) | `RollupHonkVerificationKey` (115 fields) |
+| Inner proofs | wrapper proofs (`noir-recursive`) | tube proofs (`noir-rollup`) |
+
+### Three-way comparison at 16 slots
+
+| | **Design A — IVC meta-batch** | **Design B — Recursive merged** | **Path C — IVC + pair_tube** |
+|---|---|---|---|
+| **Sub-batch proving** | ~2.6 min (concurrent IVC) | ~9.8 min (sequential recursive) | **~2.8 min** (concurrent IVC) |
+| **Aggregation** | — | ~53 s pair_wrapper | **~65 s** pair_tube |
+| **Total proving** | **~2.6 min** | ~10.7 min | **~3.9 min** |
+| **L2 DA** | 40,512 B | **23,648 B** | **23,648 B** |
+| **L2 proofs** | 2 | 1 | **1** |
+| **Private verify** | 2 × verify_honk_proof | 1 × verify_honk_proof | **1 × verify_honk_proof** |
+| **Public execution** | 2 × settle_batch@8 | 1 × settle_batch_merged@16 | **1 × settle_batch_merged@16** |
+| **Nonce advance** | +2 | +1 | **+1** |
+| **RAM per sub-batch** | ~4 GiB | ~8 GiB | **~4 GiB** |
+| **2 concurrent @ 16 GiB** | yes | no (OOM) | **yes** |
+
+Path C gets Design B's 42% DA reduction while proving ~2.7× faster (3.9 min vs 10.7 min at 16 GiB).
+
+### Running the benchmark
+
+```bash
+cd tests
+npx tsx step10-ivc-merged-16slot.ts   # Path C: IVC + pair_tube RollupHonk aggregation
+```
+
+Metrics are written to `target/step10-metrics.json`.
+
+### Implementation details
+
+- **New circuit**: `pair_tube` — uses `verify_rolluphonk_proof` / `RollupHonkProof` / `RollupHonkVerificationKey` from `bb_proof_verification`.
+- **Contract**: `L3IvcSettlement` gains `submit_merged_batch` + `settle_batch_merged` + `merged_vk_hash` storage (same methods as `L3RecursiveSettlement`).
+- **Prover**: `buildPairTubeProof` and `computePairTubeVkHash` in `prover.ts`. Tube proofs stay at `noir-rollup` target (standard IVC output). pair_tube is proved at `noir-rollup` target for L2 submission.
+
+### Note on the initial blocker
+
+The first implementation attempt tried to verify tube proofs via `verify_honk_proof` (the UltraHonk recursive verifier), which failed in two ways:
+1. `noir-recursive` tube proving: `"IPA proofs present when not expected"` — Chonk's IPA material is incompatible with the `noir-recursive` prover.
+2. Wrapping `noir-rollup` tube proofs for UltraHonk recursive verification: field arithmetic mismatch (`remainder_1024.lo`) — `verify_honk_proof` expects the `noir-recursive` algebraic structure.
+
+The fix was recognizing that `bb_proof_verification` provides `verify_rolluphonk_proof` specifically for in-circuit verification of `noir-rollup` (RollupHonk) proofs with IPA material.
+
+---
+
 ## Where to go from here
 
 - **Push sub-batch size**: `batch_app_standalone` compiles to batch=128 per `DESIGN_DECISIONS.md` §3. The ceiling is prover memory and wall-clock, not protocol. For IVC, the Chonk ECCVM 32,768-row ceiling limits batch=8 as the last known-good size — higher may not compile through the IVC/Chonk path.
-- **Generalize aggregation**: `pair_wrapper` extends trivially to a binary tree (`pair(pair(w1,w2), pair(w3,w4))` → 32 slots, etc.) with no new circuits, just more invocations. Each extra layer adds one `pair_wrapper` prove (~1 min) and doubles the underlying settle data on the final L2 tx.
+- **Generalize aggregation**: Both `pair_wrapper` and `pair_tube` extend to binary trees with level-specific variants for larger array sizes. Each extra tree level adds one aggregator prove (~60-65 s) and doubles the settle data. `pair_tube` also supports `quad_tube` (4-input) for flatter trees at larger scales.
 - **Multi-real-tx prover**: refactor `buildBatchProof` / `buildBatchProofRecursive` to chain per-tx state roots so each sub-batch can hold 8 real txs. Combined with the current 2-sub-batch bundling, that gives **16 real txs per L2 tx**.
 - **Measure L2 gas**: hook up `node.getTxReceipt(txHash)` to fill `daGas` / `l2Gas` / `publicGas` into the metrics JSON.

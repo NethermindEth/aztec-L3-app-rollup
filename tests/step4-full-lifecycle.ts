@@ -139,7 +139,7 @@ async function main() {
   const { contract: l3 } = await Contract.deploy(
     wallet,
     l3Artifact,
-    [initialStateRoot.toBigInt(), tubeVkHash.toBigInt()],
+    [initialStateRoot.toBigInt(), tubeVkHash.toBigInt(), 0n],
     "constructor",
   ).send({ from: admin });
   console.log(`  L3:    ${l3.address}`);
@@ -595,6 +595,109 @@ async function main() {
   } catch (e: any) {
     console.log(`  Corrupt proof: REJECTED -- ${e.message.slice(0, 100)}`);
     console.log("  The sandbox is performing real proof verification!\n");
+  }
+
+  // =====================================================================
+  // Step 7b: Tail-only corruption (fields 500-518 of 519-field proof)
+  //
+  // If the last 19 fields (IPA claim + IPA proof) matter to the verifier,
+  // corrupting only field 510 should fail while the early-byte corruption
+  // above also fails. If tail corruption succeeds while early corruption
+  // fails, the tail is being dropped or ignored.
+  // =====================================================================
+  console.log("=== Step 7b: Tail-only corruption (mutate field 510 of 519) ===");
+  {
+    const validProofFields = proofBytesToFields(probeBatch.tubeProof);
+    console.log(`  Proof has ${validProofFields.length} fields`);
+
+    if (validProofFields.length > 510) {
+      const tailCorruptFields = [...validProofFields];
+      tailCorruptFields[510] = tailCorruptFields[510] ^ 0xFFn; // flip field 510
+
+      try {
+        await l3.methods
+          .submit_batch(
+            validVkFields,
+            tailCorruptFields,
+            probeBatch.tubePublicInputs,
+            tubeVkHash,
+            probeBatch.settleInputs.nullifiers,
+            probeBatch.settleInputs.noteHashes,
+            probeBatch.settleInputs.depositNullifiers,
+            probeBatch.settleInputs.withdrawalClaims,
+          )
+          .send({ from: admin });
+        console.log("  Tail-corrupt proof: ACCEPTED");
+        console.log("  => Tail fields (500-518) are ignored or dropped\n");
+      } catch (e: any) {
+        console.log(`  Tail-corrupt proof: REJECTED -- ${(e.message ?? "").slice(0, 100)}`);
+        console.log("  => Tail fields reach a real verifier and matter\n");
+      }
+    } else {
+      console.log(`  SKIP: proof only has ${validProofFields.length} fields (expected >510)\n`);
+    }
+  }
+
+  // =====================================================================
+  // Step 7c: 519 vs 500 slice equivalence test
+  //
+  // Submit the same valid proof as:
+  //   (a) full 519-field array
+  //   (b) truncated to first 500 fields
+  // If both behave identically, the SDK/kernel truncates or ignores the tail.
+  // =====================================================================
+  console.log("=== Step 7c: 519 vs explicit 500 slice equivalence ===");
+  {
+    const fullFields = proofBytesToFields(probeBatch.tubeProof);
+    const sliced500 = fullFields.slice(0, 500);
+    console.log(`  Full proof: ${fullFields.length} fields`);
+    console.log(`  Sliced proof: ${sliced500.length} fields`);
+
+    let fullResult: string;
+    try {
+      await l3.methods
+        .submit_batch(
+          validVkFields,
+          fullFields,
+          probeBatch.tubePublicInputs,
+          tubeVkHash,
+          probeBatch.settleInputs.nullifiers,
+          probeBatch.settleInputs.noteHashes,
+          probeBatch.settleInputs.depositNullifiers,
+          probeBatch.settleInputs.withdrawalClaims,
+        )
+        .send({ from: admin });
+      fullResult = "ACCEPTED";
+    } catch (e: any) {
+      fullResult = `REJECTED: ${(e.message ?? "").slice(0, 80)}`;
+    }
+    console.log(`  Full 519-field proof: ${fullResult}`);
+
+    let slicedResult: string;
+    try {
+      await l3.methods
+        .submit_batch(
+          validVkFields,
+          sliced500,
+          probeBatch.tubePublicInputs,
+          tubeVkHash,
+          probeBatch.settleInputs.nullifiers,
+          probeBatch.settleInputs.noteHashes,
+          probeBatch.settleInputs.depositNullifiers,
+          probeBatch.settleInputs.withdrawalClaims,
+        )
+        .send({ from: admin });
+      slicedResult = "ACCEPTED";
+    } catch (e: any) {
+      slicedResult = `REJECTED: ${(e.message ?? "").slice(0, 80)}`;
+    }
+    console.log(`  Sliced 500-field proof: ${slicedResult}`);
+
+    if (fullResult === slicedResult) {
+      console.log("  => IDENTICAL behavior: supports truncation/ignore-tail hypothesis\n");
+    } else {
+      console.log("  => DIFFERENT behavior: tail fields affect the outcome\n");
+    }
   }
 
   // =====================================================================

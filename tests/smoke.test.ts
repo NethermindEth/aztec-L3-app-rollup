@@ -105,7 +105,7 @@ async function main() {
   const l3State = await TestL3State.create();
   const initialStateRoot = l3State.stateRoot;
   const { contract: l3 } = await Contract.deploy(
-    wallet, loadL3Artifact(), [initialStateRoot.toBigInt(), tubeVkHash.toBigInt()], "constructor",
+    wallet, loadL3Artifact(), [initialStateRoot.toBigInt(), tubeVkHash.toBigInt(), 0n], "constructor",
   ).send({ from: admin });
 
   // Fund L3 contract for withdrawal payouts.

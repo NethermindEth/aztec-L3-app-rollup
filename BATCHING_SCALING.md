@@ -98,6 +98,7 @@ All extrapolations below use these observed numbers from the shipped 16-slot tes
 | Recursive sub-batch @ batch=8 (batch_app_standalone + wrapper) | ~290 s serial, ~8 GiB peak RSS |
 | Recursive sub-batch @ batch=4 (extrapolated) | ~145 s, ~4 GiB peak RSS (half the opcodes) |
 | `pair_wrapper` prove | ~60 s, ~3 GiB peak |
+| `pair_tube` prove (RollupHonk, 519-field inner proofs) | ~65 s, ~4 GiB peak (step10 measured) |
 | `quad_wrapper` prove (estimated: 2× pair_wrapper verify work) | ~120 s, ~5-6 GiB peak |
 | Proof size on L2 (any UltraHonk rollup-target) | 16,608 B |
 | VK size | 3,680 B |
@@ -280,10 +281,48 @@ Both B1 and B2 eventually run into the same two walls that aren't proof-architec
 1. **Per-tx L2 mana ceiling on the single `settle_batch_merged@batch=N` call.** The public function's deposit-consume and withdrawal-register loops are O(N). Around N=128 the mana estimate reaches 1.5-2 M l2Gas, close to typical per-tx ceilings. Past ~200-256 slots, you'd start splitting into multiple L2 txs regardless of how clever the proof aggregation was.
 2. **Per-tx L2 DA budget**. Settle-data scales linearly with N; at batch=128 it's ~25 KB just for settle arrays. At batch=512 it's ~100 KB. Aztec tx payloads go to blob data with a per-tx allocation budget; exceeding it forces a split.
 
-Both of these are **Aztec protocol limits**, not problems with any design choice here. Past ~128-256 slot capacity per L2 tx, you increase throughput by submitting **more frequent** L2 txs, not **bigger** ones. The three paths differ only in how efficiently they use the single-L2-tx budget.
+Both of these are **Aztec protocol limits**, not problems with any design choice here. Past ~128-256 slot capacity per L2 tx, you increase throughput by submitting **more frequent** L2 txs, not **bigger** ones. The paths differ only in how efficiently they use the single-L2-tx budget.
+
+---
+
+## Path C — IVC sub-batches + pair_tube RollupHonk aggregation
+
+A fourth path that combines IVC sub-batch proving (~4 GiB each, highly concurrent) with `pair_tube` RollupHonk aggregation. Uses `verify_rolluphonk_proof` to verify tube proofs (519-field RollupHonk with IPA material) inside a Noir circuit — something `verify_honk_proof` (used by pair_wrapper) cannot do.
+
+Implemented at 16 slots in `tests/step10-ivc-merged-16slot.ts`. See [`BATCHING_OF_BATCHES.md`](./BATCHING_OF_BATCHES.md) §Path C for architecture and measured numbers.
+
+### Path C at 32 slots
+
+| Dimension | **C** (IVC + pair_tube) |
+|---|---|
+| Sub-batch size | 8 |
+| Number of sub-batches | **4** |
+| Aggregator layout | 2 × pair_tube → 1 pair_tube |
+| Aggregator prove count | 3 |
+| L2 proofs posted | 1 × merged |
+| L2 DA | **~26.1 KB** |
+| Peak RAM per prover | ~4 GiB (leaves), ~4 GiB (pair_tube) |
+| Max concurrency @ 16 GiB | **4 concurrent leaves**, 4 concurrent pair_tube |
+| Proving time (16 GiB, 4-conc) | 1 × 167s + 1 × 70s + 70s = **~5.1 min** |
+| Circuit changes | pair_tube level variants for larger settle arrays |
+| Contract changes | resize `settle_batch_merged` to batch=32 |
+
+### Path C at 128 slots
+
+| Dimension | **C** (IVC + pair_tube) |
+|---|---|
+| Sub-batches | 16 |
+| Aggregator tree | L1: 8; L2: 4; L3: 2; L4: 1 (all pair_tube variants) |
+| Aggregator proves | 15 |
+| L2 DA | **~44 KB** |
+| Proving (16 GiB, 4-conc leaves) | ~11 min leaves + ~6 min agg = **~17 min** |
+| Proving (32 GiB, 8-conc leaves) | ~5.6 min leaves + ~4 min agg = **~10 min** |
+| Feasible as single L2 tx? | **Yes** |
+
+Path C's advantage scales with the number of sub-batches: IVC leaves at ~4 GiB allow 4 concurrent on 16 GiB (vs B2's 2 concurrent at ~8 GiB each), and the pair_tube aggregation overhead (~10% slower per prove than pair_wrapper) is negligible compared to the leaf-level speedup.
 
 ## Related docs
 
-- [`BATCHING_OF_BATCHES.md`](./BATCHING_OF_BATCHES.md) — the 16-slot implementation that ships today; starting point for all extrapolations above.
+- [`BATCHING_OF_BATCHES.md`](./BATCHING_OF_BATCHES.md) — the 16-slot implementations (Design A, Design B, Path C) with architecture, reproduction, and side-by-side measurements.
 - [`DESIGN_DECISIONS.md`](./DESIGN_DECISIONS.md) §3 — recursive UltraHonk pipeline rationale and ACIR opcode scaling table.
 - [`README.md`](./README.md) — repo overview and single-batch test instructions.

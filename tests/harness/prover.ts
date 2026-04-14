@@ -124,6 +124,12 @@ export interface BatchArtifact {
   tubePublicInputs: Fr[];
 }
 
+// NOTE: A tubeTarget option was explored for Path C (IVC + recursive
+// aggregation) but is NOT feasible. The tube circuit's Chonk verification
+// produces IPA material that prevents noir-recursive tube proving. And
+// noir-rollup tube proofs use a different algebraic commitment scheme
+// that can't be recursively verified in-circuit. See step10 header.
+
 // -------------------------------------------------------------------------
 // Per-tx proof helper: execute circuit + generate proof + get VK
 // -------------------------------------------------------------------------
@@ -575,4 +581,148 @@ export async function computeTubeVkHash(api: Barretenberg): Promise<{ vkHash: Fr
   const vkFields = vkToFields(vk);
   const vkHash = await p2h(vkFields);
   return { vkHash, vk };
+}
+
+// -------------------------------------------------------------------------
+// Compute pair_tube VK hash.
+// -------------------------------------------------------------------------
+
+export async function computePairTubeVkHash(api: Barretenberg): Promise<{ vkHash: Fr; vk: Uint8Array }> {
+  const circuit = loadCircuit("pair_tube");
+  const backend = new UltraHonkBackend(circuit.bytecode, api);
+  const vk = await backend.getVerificationKey({ verifierTarget: "noir-rollup" });
+  const vkFields = vkToFields(vk);
+  const vkHash = await p2h(vkFields);
+  return { vkHash, vk };
+}
+
+// -------------------------------------------------------------------------
+// buildPairTubeProof -- Path C: aggregate 2 IVC tube proofs via pair_tube.
+//
+// Uses verify_rolluphonk_proof (PROOF_TYPE_ROLLUP_HONK = 4) to verify
+// noir-rollup tube proofs (519 fields with IPA material) inside the
+// pair_tube circuit, then outputs a single merged proof.
+// -------------------------------------------------------------------------
+
+export interface PairTubeArtifact {
+  pairProof: Uint8Array;
+  pairVk: Uint8Array;
+  mergedPublicInputs: string[];  // 8 fields -- BatchOutput shape, merged
+  mergedNullifiers: Fr[];        // 32 fields
+  mergedNoteHashes: Fr[];        // 32 fields
+  mergedDeposits: Fr[];          // 16 fields
+  mergedWithdrawals: Fr[];       // 16 fields
+}
+
+// RollupHonk proof is 519 fields (449 base + 6 IPA claim + 64 IPA proof).
+const ROLLUP_HONK_PROOF_FIELDS = 519;
+
+export async function buildPairTubeProof(
+  api: Barretenberg,
+  artifactA: BatchArtifact,
+  artifactB: BatchArtifact,
+): Promise<PairTubeArtifact> {
+  // 1. Sanity: both batches must share the same tube VK.
+  if (artifactA.tubeVk.length !== artifactB.tubeVk.length) {
+    throw new Error("buildPairTubeProof: tube VK byte lengths differ");
+  }
+  for (let i = 0; i < artifactA.tubeVk.length; i++) {
+    if (artifactA.tubeVk[i] !== artifactB.tubeVk[i]) {
+      throw new Error("buildPairTubeProof: tube VKs differ at byte " + i);
+    }
+  }
+
+  // 2. Sanity: state-root chain.
+  if (artifactA.newStateRoot.toBigInt() !== artifactB.oldStateRoot.toBigInt()) {
+    throw new Error(
+      `buildPairTubeProof: state chain broken: A.new=${artifactA.newStateRoot} B.old=${artifactB.oldStateRoot}`,
+    );
+  }
+
+  // 3. Merge settle arrays (A then B).
+  const mergedNullifiers = [
+    ...artifactA.settleInputs.nullifiers,
+    ...artifactB.settleInputs.nullifiers,
+  ];
+  const mergedNoteHashes = [
+    ...artifactA.settleInputs.noteHashes,
+    ...artifactB.settleInputs.noteHashes,
+  ];
+  const mergedDeposits = [
+    ...artifactA.settleInputs.depositNullifiers,
+    ...artifactB.settleInputs.depositNullifiers,
+  ];
+  const mergedWithdrawals = [
+    ...artifactA.settleInputs.withdrawalClaims,
+    ...artifactB.settleInputs.withdrawalClaims,
+  ];
+
+  // 4. Hashes of merged arrays.
+  const mergedNullifiersHash = await p2h(mergedNullifiers);
+  const mergedNoteHashesHash = await p2h(mergedNoteHashes);
+  const mergedDepositsHash = await p2h(mergedDeposits);
+  const mergedWithdrawalsHash = await p2h(mergedWithdrawals);
+
+  // 5. Tube VK hash.
+  const VK_FIELDS = 115;
+  const tubeVkFields = vkToFields(artifactA.tubeVk);
+  const tubeVkHash = await p2h(tubeVkFields);
+
+  // 6. Execute pair_tube circuit.
+  console.log("    Executing pair_tube...");
+  const pairCircuit = loadCircuit("pair_tube");
+  const pairNoir = new Noir(pairCircuit);
+
+  const f2s = (f: Fr) => f.toString();
+
+  const { witness: pairWitness } = await pairNoir.execute({
+    tube_vk: bytesToFieldStrings(artifactA.tubeVk, VK_FIELDS),
+    tube_vk_hash: f2s(tubeVkHash),
+
+    tube_proof_a: bytesToFieldStrings(artifactA.tubeProof, ROLLUP_HONK_PROOF_FIELDS),
+    tube_public_inputs_a: artifactA.tubePublicInputs.map(f2s),
+
+    tube_proof_b: bytesToFieldStrings(artifactB.tubeProof, ROLLUP_HONK_PROOF_FIELDS),
+    tube_public_inputs_b: artifactB.tubePublicInputs.map(f2s),
+
+    nullifiers_a: artifactA.settleInputs.nullifiers.map(f2s),
+    note_hashes_a: artifactA.settleInputs.noteHashes.map(f2s),
+    deposits_a: artifactA.settleInputs.depositNullifiers.map(f2s),
+    withdrawals_a: artifactA.settleInputs.withdrawalClaims.map(f2s),
+
+    nullifiers_b: artifactB.settleInputs.nullifiers.map(f2s),
+    note_hashes_b: artifactB.settleInputs.noteHashes.map(f2s),
+    deposits_b: artifactB.settleInputs.depositNullifiers.map(f2s),
+    withdrawals_b: artifactB.settleInputs.withdrawalClaims.map(f2s),
+
+    old_state_root: f2s(artifactA.oldStateRoot),
+    new_state_root: f2s(artifactB.newStateRoot),
+    merged_nullifiers_hash: f2s(mergedNullifiersHash),
+    merged_note_hashes_hash: f2s(mergedNoteHashesHash),
+    merged_deposit_nullifiers_hash: f2s(mergedDepositsHash),
+    merged_withdrawal_claims_hash: f2s(mergedWithdrawalsHash),
+    nullifier_tree_start_index: f2s(artifactA.nullifierTreeStartIndex),
+    note_hash_tree_start_index: f2s(artifactA.noteHashTreeStartIndex),
+  });
+  console.log("    pair_tube executed");
+
+  // 7. Prove pair_tube at noir-rollup target for L2 submission.
+  console.log("    Proving pair_tube (UltraHonk, noir-rollup)...");
+  const pairBackend = new UltraHonkBackend(pairCircuit.bytecode, api);
+  const pairProofData = await pairBackend.generateProof(pairWitness, { verifierTarget: "noir-rollup" });
+  const pairVk = await pairBackend.getVerificationKey({ verifierTarget: "noir-rollup" });
+  console.log(`    pair_tube proof: ${pairProofData.proof.length} bytes`);
+
+  const pairValid = await pairBackend.verifyProof(pairProofData, { verifierTarget: "noir-rollup" });
+  console.log(`    pair_tube verified: ${pairValid}`);
+
+  return {
+    pairProof: pairProofData.proof,
+    pairVk,
+    mergedPublicInputs: pairProofData.publicInputs,
+    mergedNullifiers,
+    mergedNoteHashes,
+    mergedDeposits,
+    mergedWithdrawals,
+  };
 }

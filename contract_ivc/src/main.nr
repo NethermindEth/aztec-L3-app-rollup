@@ -23,6 +23,11 @@ pub contract L3IvcSettlement {
     global BATCH_NULLIFIERS_COUNT: u32 = 16;  // MAX_BATCH_SIZE * 2
     global BATCH_NOTE_HASHES_COUNT: u32 = 16; // MAX_BATCH_SIZE * 2
 
+    // Merged-batch sizes for pair_wrapper aggregated proofs (2 sub-batches).
+    global MERGED_BATCH_SIZE: u32 = 16;
+    global MERGED_BATCH_NULLIFIERS_COUNT: u32 = 32;
+    global MERGED_BATCH_NOTE_HASHES_COUNT: u32 = 32;
+
     // -----------------------------------------------------------------------
     // Storage
     // -----------------------------------------------------------------------
@@ -34,6 +39,9 @@ pub contract L3IvcSettlement {
         // functions can read it directly to bind verify_honk_proof's vk_hash
         // argument to the contract-committed circuit.
         tube_vk_hash: PublicImmutable<Field, Context>,
+        // merged_vk_hash: the pair_wrapper VK hash (used by submit_merged_batch).
+        // Enables Path C: IVC sub-batches + recursive aggregation via pair_wrapper.
+        merged_vk_hash: PublicImmutable<Field, Context>,
         batch_nonce: PublicMutable<Field, Context>,
         nullifier_tree_start_index: PublicMutable<Field, Context>,
         note_hash_tree_start_index: PublicMutable<Field, Context>,
@@ -47,9 +55,10 @@ pub contract L3IvcSettlement {
 
     #[external("public")]
     #[initializer]
-    fn constructor(initial_state_root: Field, tube_vk_hash: Field) {
+    fn constructor(initial_state_root: Field, tube_vk_hash: Field, merged_vk_hash: Field) {
         self.storage.latest_root.write(initial_state_root);
         self.storage.tube_vk_hash.initialize(tube_vk_hash);
+        self.storage.merged_vk_hash.initialize(merged_vk_hash);
         self.storage.batch_nonce.write(0);
         // Nullifier tree index 0 is the genesis zero leaf, so insertions start at 1.
         self.storage.nullifier_tree_start_index.write(1);
@@ -246,6 +255,63 @@ pub contract L3IvcSettlement {
     }
 
     // -----------------------------------------------------------------------
+    // submit_merged_batch  (private)  -- Path C: IVC sub-batches + recursive
+    //   aggregation via pair_wrapper.
+    //
+    // Verifies ONE pair_wrapper UltraHonk proof that attests to the combined
+    // state transition of TWO IVC sub-batches (16 txs of slot capacity), then
+    // enqueues ONE settle_batch_merged public call that advances state once.
+    //
+    // The pair_wrapper circuit recursively verifies two tube proofs (generated
+    // with noir-recursive target) and merges their settle data. The merged
+    // proof's public inputs follow the standard BatchOutput schema.
+    //
+    // Contrast with submit_two_batches (Design A):
+    //   - Design A: 2 proofs in 1 L2 tx, 2 settles, nonce += 2.
+    //   - Path C:   1 proof in 1 L2 tx, 1 settle, nonce += 1.
+    // -----------------------------------------------------------------------
+
+    #[external("private")]
+    fn submit_merged_batch(
+        merged_vk: UltraHonkVerificationKey,
+        merged_proof: UltraHonkZKProof,
+        public_inputs: [Field; BATCH_OUTPUT_FIELDS],
+        merged_vk_hash: Field,
+        nullifiers: [Field; MERGED_BATCH_NULLIFIERS_COUNT],
+        note_hashes: [Field; MERGED_BATCH_NOTE_HASHES_COUNT],
+        deposit_nullifiers: [Field; MERGED_BATCH_SIZE],
+        withdrawal_claims: [Field; MERGED_BATCH_SIZE],
+    ) {
+        // Bind the VK to the contract's committed pair_wrapper vk hash.
+        assert(
+            merged_vk_hash == self.storage.merged_vk_hash.read(),
+            "submit_merged_batch: merged_vk_hash does not match contract's committed hash",
+        );
+        verify_honk_proof(merged_vk, merged_proof, public_inputs, merged_vk_hash);
+
+        // Count non-zero entries for tree index advancement.
+        let mut null_count: Field = 0;
+        for i in 0..MERGED_BATCH_NULLIFIERS_COUNT {
+            if nullifiers[i] != 0 { null_count += 1; }
+        }
+        let mut nh_count: Field = 0;
+        for i in 0..MERGED_BATCH_NOTE_HASHES_COUNT {
+            if note_hashes[i] != 0 { nh_count += 1; }
+        }
+
+        self.enqueue_self.settle_batch_merged(
+            public_inputs[0], // old_state_root (A.old)
+            public_inputs[1], // new_state_root (B.new)
+            deposit_nullifiers,
+            withdrawal_claims,
+            null_count,
+            nh_count,
+            nullifiers,
+            note_hashes,
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // settle_batch  (public, internal)
     // -----------------------------------------------------------------------
 
@@ -298,6 +364,60 @@ pub contract L3IvcSettlement {
         // All batch data (nullifiers, note_hashes, deposit_nullifiers,
         // withdrawal_claims) is DA-available via the public function arguments.
         // No logs emitted -- L3 indexers decode directly from calldata.
+    }
+
+    // -----------------------------------------------------------------------
+    // settle_batch_merged  (public, internal) -- batch=16 array sizing
+    // -----------------------------------------------------------------------
+
+    #[external("public")]
+    #[only_self]
+    fn settle_batch_merged(
+        old_state_root: Field,
+        new_state_root: Field,
+        deposit_nullifiers: [Field; MERGED_BATCH_SIZE],
+        withdrawal_claims: [Field; MERGED_BATCH_SIZE],
+        null_count: Field,
+        nh_count: Field,
+        nullifiers: [Field; MERGED_BATCH_NULLIFIERS_COUNT],
+        note_hashes: [Field; MERGED_BATCH_NOTE_HASHES_COUNT],
+    ) {
+        // 1. State chain check.
+        assert(
+            self.storage.latest_root.read() == old_state_root,
+            "old state root mismatch",
+        );
+
+        // 2. Consume pending deposits (16 slots).
+        for i in 0..MERGED_BATCH_SIZE {
+            if deposit_nullifiers[i] != 0 {
+                assert(
+                    self.storage.pending_deposits.at(deposit_nullifiers[i]).read(),
+                    "deposit not in pending list",
+                );
+                self.storage.pending_deposits.at(deposit_nullifiers[i]).write(false);
+            }
+        }
+
+        // 3. Register pending withdrawals (16 slots).
+        for i in 0..MERGED_BATCH_SIZE {
+            if withdrawal_claims[i] != 0 {
+                self.storage.pending_withdrawals.at(withdrawal_claims[i]).write(true);
+            }
+        }
+
+        // 4. Advance state ONCE (single state transition for the whole merged batch).
+        self.storage.latest_root.write(new_state_root);
+        self.storage.batch_nonce.write(self.storage.batch_nonce.read() + 1);
+        self.storage.nullifier_tree_start_index.write(
+            self.storage.nullifier_tree_start_index.read() + null_count,
+        );
+        self.storage.note_hash_tree_start_index.write(
+            self.storage.note_hash_tree_start_index.read() + nh_count,
+        );
+
+        // DA-available via the public function arguments: nullifiers, note_hashes,
+        // deposit_nullifiers, withdrawal_claims (all batch=16 sized). No logs.
     }
 
     // -----------------------------------------------------------------------
