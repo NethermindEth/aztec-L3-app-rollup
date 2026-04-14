@@ -104,13 +104,13 @@ async function main() {
   const artifactB = await buildBatchProofRecursive(api, l3StateB, [depProofB], { wrapperTarget: "noir-recursive" });
   console.log(`    wrapper proof B: ${artifactB.tubeProof.length} bytes (${artifactB.tubeProof.length / 32} fields)\n`);
 
-  // Step 2: Build pair_wrapper proof at noir-rollup (current behavior) to get baseline.
-  console.log("Building pair_wrapper proof at noir-rollup (baseline)...");
-  const pairArtifactRollup = await buildPairWrapperProof(api, artifactA, artifactB);
-  const rollupFields = pairArtifactRollup.pairProof.length / 32;
-  console.log(`  noir-rollup: ${pairArtifactRollup.pairProof.length} bytes (${rollupFields} fields)\n`);
+  // Step 2: Build pair_wrapper proof at noir-recursive (current behavior).
+  console.log("Building pair_wrapper proof at noir-recursive (current default)...");
+  const pairArtifact = await buildPairWrapperProof(api, artifactA, artifactB);
+  const pairFields = pairArtifact.pairProof.length / 32;
+  console.log(`  noir-recursive: ${pairArtifact.pairProof.length} bytes (${pairFields} fields)\n`);
 
-  // Step 3: Try pair_wrapper proof at noir-recursive.
+  // Step 3: Verify it's 500 fields (not 519).
   console.log("Building pair_wrapper proof at noir-recursive (the test)...");
   try {
     const { Noir } = await import("@aztec/noir-noir_js");
@@ -202,7 +202,7 @@ async function main() {
       const wrapperVkForContract = await (async () => {
         const wc = JSON.parse(readFileSync(resolve(TARGET_DIR, "l3_wrapper.json"), "utf-8"));
         const wb = new UltraHonkBackend(wc.bytecode, api);
-        const v = await wb.getVerificationKey({ verifierTarget: "noir-rollup" });
+        const v = await wb.getVerificationKey({ verifierTarget: "noir-recursive" });
         return await p2h(vkToFields(v));
       })();
       const pairVkForContract = await p2h(vkToFields(vk));

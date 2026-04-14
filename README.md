@@ -243,6 +243,7 @@ tests/
   step4-full-lifecycle.ts               IVC e2e (benchmark only)
   step8-ivc-meta-16slot.ts              IVC meta-batch (benchmark only)
   step10-ivc-merged-16slot.ts           IVC + pair_tube (benchmark only)
+  probe-recursive-target.ts             Diagnostic: noir-recursive proof format validation
   step2-submit-batch-probe.ts           Proof verification diagnostic probes
 ```
 

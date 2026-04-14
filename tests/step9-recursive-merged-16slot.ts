@@ -5,13 +5,14 @@
  *
  * Structure:
  *   - 2 sub-batches, each batch_app_standalone[8] + wrapper[noir-recursive].
- *   - pair_wrapper aggregates both wrapper proofs → 1 UltraHonk[noir-rollup]
- *     proof that attests to combined 16-tx state transition.
+ *   - pair_wrapper aggregates both wrapper proofs → 1 UltraHonk[noir-recursive]
+ *     proof (500 fields, matching contract ABI) that attests to combined
+ *     16-tx state transition.
  *   - Submitted to L2 via new submit_merged_batch method, causing a single
  *     settle_batch_merged public call (nonce += 1).
  *
- * Concurrency: two bb instances prove the sub-batches in parallel via
- * Promise.all. pair_wrapper runs serially after both complete.
+ * Sub-batches are proved sequentially (each peaks ~8 GiB; concurrent would
+ * exceed 16 GiB WSL budget). pair_wrapper runs serially after both complete.
  *
  * Total slot capacity: 16 (2 real deposits + 14 padding).
  */
@@ -225,7 +226,7 @@ async function main() {
   const daFields =
     mergedVkFields.length                       // merged VK
     + 1                                         // merged vk hash
-    + mergedProofFields.length                  // single merged proof (~519)
+    + mergedProofFields.length                  // single merged proof (500 fields, noir-recursive)
     + pairArtifact.mergedPublicInputs.length    // 8
     + pairArtifact.mergedNullifiers.length      // 32
     + pairArtifact.mergedNoteHashes.length      // 32

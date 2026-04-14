@@ -271,7 +271,16 @@ export async function buildBatchProofRecursive(
   const wrapperBackend = new UltraHonkBackend(wrapperCircuit.bytecode, api);
   const wrapperProofData = await wrapperBackend.generateProof(wrapperWitness, { verifierTarget: wrapperTarget });
   const wrapperVk = await wrapperBackend.getVerificationKey({ verifierTarget: wrapperTarget });
-  console.log(`    wrapper proof: ${wrapperProofData.proof.length} bytes`);
+  const wrapperProofFields = wrapperProofData.proof.length / 32;
+  console.log(`    wrapper proof: ${wrapperProofData.proof.length} bytes (${wrapperProofFields} fields)`);
+
+  // Guard against silent target regression: noir-recursive must produce 500-field proofs.
+  if (wrapperTarget === "noir-recursive" && wrapperProofFields !== 500) {
+    throw new Error(
+      `wrapper proof has ${wrapperProofFields} fields (expected 500 for noir-recursive). ` +
+      `If 519, the target may have regressed to noir-rollup. See SILENT_FAILURE_REVIEW.md.`,
+    );
+  }
 
   // 7. Verify locally.
   const wrapperValid = await wrapperBackend.verifyProof(wrapperProofData, { verifierTarget: wrapperTarget });
@@ -292,7 +301,7 @@ export async function buildBatchProofRecursive(
     noteInsertionIndices,
     tubeProof: wrapperProofData.proof,
     tubeVk: wrapperVk,
-    tubePublicInputs: batchAppProofData.publicInputs.map((x: string) => new Fr(BigInt(x))),
+    tubePublicInputs: wrapperProofData.publicInputs.map((x: string) => new Fr(BigInt(x))),
   };
 }
 
@@ -446,7 +455,16 @@ export async function buildPairWrapperProof(
   const pairBackend = new UltraHonkBackend(pairCircuit.bytecode, api);
   const pairProofData = await pairBackend.generateProof(pairWitness, { verifierTarget: "noir-recursive" });
   const pairVk = await pairBackend.getVerificationKey({ verifierTarget: "noir-recursive" });
-  console.log(`    pair_wrapper proof: ${pairProofData.proof.length} bytes`);
+  const pairProofFields = pairProofData.proof.length / 32;
+  console.log(`    pair_wrapper proof: ${pairProofData.proof.length} bytes (${pairProofFields} fields)`);
+
+  // Guard: merged proof must be 500 fields for contract ABI compatibility.
+  if (pairProofFields !== 500) {
+    throw new Error(
+      `pair_wrapper proof has ${pairProofFields} fields (expected 500). ` +
+      `If 519, the target may have regressed to noir-rollup. See SILENT_FAILURE_REVIEW.md.`,
+    );
+  }
 
   const pairValid = await pairBackend.verifyProof(pairProofData, { verifierTarget: "noir-recursive" });
   console.log(`    pair_wrapper verified: ${pairValid}`);

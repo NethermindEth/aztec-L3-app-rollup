@@ -119,7 +119,7 @@ async function main() {
   const { contract: l3 } = await Contract.deploy(
     wallet,
     l3Artifact,
-    [initialStateRoot.toBigInt(), wrapperVkHash.toBigInt()],
+    [initialStateRoot.toBigInt(), wrapperVkHash.toBigInt(), 0n],
     "constructor",
   ).send({ from: admin });
   console.log(`  L3:    ${l3.address}`);
