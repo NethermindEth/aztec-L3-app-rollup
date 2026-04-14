@@ -99,12 +99,12 @@ export interface BuildRecursiveOptions {
   /**
    * Verifier target for the wrapper proof.
    *
-   * - "noir-rollup" (default): the wrapper proof is directly verified on L2
-   *   by L3RecursiveSettlement.submit_batch. Use this for the single-batch
-   *   submission path.
-   * - "noir-recursive": the wrapper proof will be verified recursively inside
-   *   another circuit (pair_wrapper). Use this when the batch proof is to be
-   *   aggregated via buildPairWrapperProof before L2 submission.
+   * - "noir-recursive" (default): produces 500-field UltraHonkZK proofs that
+   *   match the contract's UltraHonkZKProof ABI. Use for both direct L2
+   *   submission (submit_batch) and pair_wrapper aggregation.
+   * - "noir-rollup": produces 519-field RollupHonk proofs with IPA material.
+   *   NOT recommended — the contract ABI declares [Field; 500] and the SDK
+   *   silently truncates the extra 19 fields. See SILENT_FAILURE_REVIEW.md.
    */
   wrapperTarget?: "noir-rollup" | "noir-recursive";
 }
@@ -115,7 +115,7 @@ export async function buildBatchProofRecursive(
   realSlots: TxProofResult[],
   options: BuildRecursiveOptions = {},
 ): Promise<BatchArtifact> {
-  const wrapperTarget = options.wrapperTarget ?? "noir-rollup";
+  const wrapperTarget = options.wrapperTarget ?? "noir-recursive";
   if (realSlots.length > MAX_BATCH_SIZE) throw new Error("too many slots");
 
   const oldStateRoot = state.stateRoot;
@@ -303,7 +303,7 @@ export async function buildBatchProofRecursive(
 export async function computeWrapperVkHash(api: Barretenberg): Promise<{ vkHash: Fr; vk: Uint8Array }> {
   const wrapperCircuit = loadCircuit("wrapper");
   const wrapperBackend = new UltraHonkBackend(wrapperCircuit.bytecode, api);
-  const vk = await wrapperBackend.getVerificationKey({ verifierTarget: "noir-rollup" });
+  const vk = await wrapperBackend.getVerificationKey({ verifierTarget: "noir-recursive" });
   const vkFields = vkToFields(vk);
   const vkHash = await p2h(vkFields);
   return { vkHash, vk };
@@ -321,7 +321,7 @@ export async function computeWrapperVkHash(api: Barretenberg): Promise<{ vkHash:
 export async function computePairWrapperVkHash(api: Barretenberg): Promise<{ vkHash: Fr; vk: Uint8Array }> {
   const circuit = loadCircuit("pair_wrapper");
   const backend = new UltraHonkBackend(circuit.bytecode, api);
-  const vk = await backend.getVerificationKey({ verifierTarget: "noir-rollup" });
+  const vk = await backend.getVerificationKey({ verifierTarget: "noir-recursive" });
   const vkFields = vkToFields(vk);
   const vkHash = await p2h(vkFields);
   return { vkHash, vk };
@@ -438,14 +438,17 @@ export async function buildPairWrapperProof(
   });
   console.log("    pair_wrapper executed");
 
-  // 7. Prove pair_wrapper at noir-rollup target for L2 submission.
-  console.log("    Proving pair_wrapper (UltraHonk, noir-rollup)...");
+  // 7. Prove pair_wrapper at noir-recursive target for L2 submission.
+  //    This produces 500-field UltraHonkZK proofs matching the contract's ABI.
+  //    (noir-rollup would produce 519-field RollupHonk proofs that the SDK
+  //    silently truncates — see SILENT_FAILURE_REVIEW.md.)
+  console.log("    Proving pair_wrapper (UltraHonk, noir-recursive)...");
   const pairBackend = new UltraHonkBackend(pairCircuit.bytecode, api);
-  const pairProofData = await pairBackend.generateProof(pairWitness, { verifierTarget: "noir-rollup" });
-  const pairVk = await pairBackend.getVerificationKey({ verifierTarget: "noir-rollup" });
+  const pairProofData = await pairBackend.generateProof(pairWitness, { verifierTarget: "noir-recursive" });
+  const pairVk = await pairBackend.getVerificationKey({ verifierTarget: "noir-recursive" });
   console.log(`    pair_wrapper proof: ${pairProofData.proof.length} bytes`);
 
-  const pairValid = await pairBackend.verifyProof(pairProofData, { verifierTarget: "noir-rollup" });
+  const pairValid = await pairBackend.verifyProof(pairProofData, { verifierTarget: "noir-recursive" });
   console.log(`    pair_wrapper verified: ${pairValid}`);
 
   return {

@@ -2,7 +2,7 @@
 
 > Extrapolation of the shipped 16-slot batching-of-batches work (`BATCHING_OF_BATCHES.md`) to larger capacities per L2 transaction.
 
-The shipped design settles **16 L3 tx slots per L2 tx** via two 8-slot sub-batches. This doc extrapolates to **32 slots** and **128 slots** using three approaches that trade off DA, proving time, and prover RAM differently.
+The recursive merged-proof design (Design B / Path B2) is the **primary production path** — it produces correctly-formatted 500-field `noir-recursive` proofs matching the contract ABI. IVC-based paths (A, C) are included for comparison but have an unresolved proof format mismatch (519-field `noir-rollup` proofs silently truncated to 500 by the SDK). See [`SILENT_FAILURE_REVIEW.md`](./SILENT_FAILURE_REVIEW.md).
 
 ---
 
@@ -10,7 +10,9 @@ The shipped design settles **16 L3 tx slots per L2 tx** via two 8-slot sub-batch
 
 All three aim at one L2 transaction settling N L3 slots. They differ in *how* the N slots get proven, aggregated, and put on the L2 tx.
 
-### Path A — IVC meta-batch (extend `submit_two_batches` to `submit_N_batches`)
+> **IVC paths (A, B1 with IVC sub-batches, C) are indicative benchmarks only** due to the `noir-rollup` proof format mismatch. Proving time measurements are valid; on-chain verification is not.
+
+### Path A — IVC meta-batch (indicative — proof format mismatch)
 
 ```
 sub-batch 1 ──► IVC pipeline ──► tube proof₁ ──┐
@@ -100,7 +102,8 @@ All extrapolations below use these observed numbers from the shipped 16-slot tes
 | `pair_wrapper` prove | ~60 s, ~3 GiB peak |
 | `pair_tube` prove (RollupHonk, 519-field inner proofs) | ~65 s, ~4 GiB peak (step10 measured) |
 | `quad_wrapper` prove (estimated: 2× pair_wrapper verify work) | ~120 s, ~5-6 GiB peak |
-| Proof size on L2 (any UltraHonk rollup-target) | 16,608 B |
+| Proof size on L2 (`noir-rollup`, 519 fields) | 16,608 B |
+| Proof size on L2 (`noir-recursive`, 500 fields — Design B only) | 16,000 B |
 | VK size | 3,680 B |
 | Settle data at batch=N | 192 N bytes |
 

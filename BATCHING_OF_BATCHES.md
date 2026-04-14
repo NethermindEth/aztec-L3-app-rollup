@@ -1,35 +1,46 @@
 # Batching-of-Batches on Aztec L3
 
-> Three ways to settle **16 L3 transactions in one L2 transaction**, with side-by-side measurements.
+> Settling **16 L3 transactions in one L2 transaction** via recursive proof aggregation, with IVC benchmarks for comparison.
 
-All three paths in this repo handle the **same total capacity per L2 tx: 16 L3 tx slots** (processed as 2 independent sub-batches of 8). They differ in how the two sub-batches are combined into a single L2 submission:
+## Recursive merged-proof (primary design)
 
-- **Design A — IVC meta-batch** sends **two proofs** in one L2 tx (no aggregation).
-- **Design B — Recursive merged-proof** aggregates both sub-batches into **one proof** via `pair_wrapper` (verifies UltraHonk wrapper proofs).
-- **Path C — IVC + RollupHonk aggregation** aggregates both sub-batches into **one proof** via `pair_tube` (verifies RollupHonk tube proofs with IPA material using `verify_rolluphonk_proof`). Combines IVC's fast proving with Design B's DA savings.
+The `pair_wrapper` circuit recursively verifies two wrapper proofs and outputs a single merged UltraHonk proof. This is the **only path with correct proof format alignment**: it produces 500-field `noir-recursive` proofs matching the contract's `UltraHonkZKProof` ABI.
 
-All three ship as end-to-end tests you can run yourself (`step8-*`, `step9-*`, `step10-*`) to reproduce the measurements.
+| | Value |
+|---|---|
+| **Total L3 tx capacity per L2 tx** | **16 slots** (2 sub-batches × 8) |
+| Proofs on the L2 tx | **1** × UltraHonk (16,000 B, 500 fields) |
+| L2 function-arg DA | **23,040 bytes** |
+| Client proving wall-clock | ~10.7 min sequential / ~5.2 min concurrent (≥24 GiB RAM) |
+| Private-circuit verify cost | 1 × `verify_honk_proof` |
+| Public execution | 1 × `settle_batch_merged` at batch=16 |
+| Proof format | 500-field `noir-recursive` — **matches contract ABI** |
 
----
+End-to-end test: `npx tsx tests/step9-recursive-merged-16slot.ts`
 
-## At a glance
+## IVC benchmarks (indicative only)
 
-| | **Design A — IVC meta-batch** | **Design B — Recursive merged-proof** |
-|---|---|---|
-| **Total L3 tx capacity per L2 tx** | **16 slots** | **16 slots** |
-| Sub-batches per L2 tx | **2** | **2** |
-| Sub-batch size (per proof) | **8 slots** | **8 slots** |
-| Proofs on the L2 tx | **2** × UltraHonk (16,608 B each) | **1** × UltraHonk (16,608 B) — aggregated |
-| How the sub-batches combine | `submit_two_batches` verifies both proofs; enqueues 2 `settle_batch` calls | `pair_wrapper` recursively verifies both wrappers → 1 merged proof; 1 `settle_batch_merged` call |
-| Nonce advance per L2 tx | +2 | +1 |
-| L2 function-arg DA | 40,512 bytes | 23,648 bytes (**-42%**) |
-| Client proving wall-clock | **2.6 min** (2 sub-batches concurrent) | **10.7 min** seq / ≈ 5.2 min conc. with ≥24 GiB RAM |
-| Private-circuit verify cost | 2 × `verify_honk_proof` | 1 × `verify_honk_proof` |
-| Public execution | 2 × `settle_batch` at batch=8 (8+8 deposit/withdrawal slots each) | 1 × `settle_batch_merged` at batch=16 (16 deposit/withdrawal slots) |
-| New circuits needed | 0 | 1 (`pair_wrapper`) |
-| Aztec contract changes | Add `submit_two_batches` method | Add `submit_merged_batch` + `settle_batch_merged` + `merged_vk_hash` storage |
+> **Warning: IVC paths have an unresolved proof format mismatch.** IVC tube proofs are 519-field `noir-rollup` (RollupHonk with IPA material). The contract ABI declares 500-field `UltraHonkZKProof`. The SDK silently truncates the excess 19 fields. The sandbox does not enforce proof verification (`PXE_PROVER=none`), so these tests pass but proof soundness is not validated. **These results are for benchmarking proving speed only, not for production use.** See [`SILENT_FAILURE_REVIEW.md`](./SILENT_FAILURE_REVIEW.md).
 
-**Same total throughput, different trade-offs**: Design A is faster to prove; Design B has smaller DA and cheaper on-L2 verification, at the cost of an extra aggregator prove.
+Two IVC-based batching designs were built for comparison:
+
+- **Design A — IVC meta-batch** sends **two tube proofs** in one L2 tx (no aggregation). Faster proving (~2.6 min) but higher DA (40,512 B) and 2 × `verify_honk_proof` in the kernel.
+- **Path C — IVC + RollupHonk aggregation** aggregates two tube proofs into **one proof** via `pair_tube` using `verify_rolluphonk_proof`. Gets the recursive design's DA savings with IVC's proving speed (~3.9 min).
+
+### Indicative comparison at 16 slots
+
+| | **Recursive merged** | **IVC meta-batch (A)** | **IVC + pair_tube (C)** |
+|---|---|---|---|
+| **Proof format** | **500 fields (correct)** | 519 fields (truncated) | 519 fields (truncated) |
+| **Production-ready?** | Pending sandbox verification | **No** (format mismatch) | **No** (format mismatch) |
+| **Proving time** | ~10.7 min | **~2.6 min** | **~3.9 min** |
+| **L2 DA** | **23,040 B** | 40,512 B | 23,648 B |
+| **L2 proofs** | 1 (500 fields) | 2 (519 fields each) | 1 (519 fields) |
+| **Nonce advance** | +1 | +2 | +1 |
+| **RAM per sub-batch** | ~8 GiB | ~4 GiB | ~4 GiB |
+| **2 concurrent @ 16 GiB** | no (OOM) | yes | yes |
+
+The IVC paths prove faster because IVC sub-batches are ~4 GiB each (allowing 2 concurrent on 16 GiB), vs ~8 GiB for recursive sub-batches. If Aztec resolves the `noir-rollup` proof format issue (RollupHonk support in MegaBuilder, or IPA-free `noir-recursive` tube proving), the IVC paths would become viable for production.
 
 ---
 
@@ -45,7 +56,9 @@ To avoid confusion, here's what each quantity counts:
 
 ---
 
-## Design A — IVC meta-batch
+## Design A — IVC meta-batch (indicative benchmark — proof format mismatch)
+
+> **Warning**: IVC tube proofs are 519-field `noir-rollup`. The contract ABI expects 500 fields. The SDK silently truncates. Results below are for proving-speed benchmarking only.
 
 Two independent IVC pipelines produce two tube proofs. The L3 contract's `submit_two_batches` method verifies both proofs in one private-function invocation and enqueues two sequential `settle_batch` public calls.
 
@@ -86,9 +99,9 @@ Two `verify_honk_proof` calls in the private circuit. Two `settle_batch` public 
 
 ---
 
-## Design B — Recursive merged-proof
+## Design B — Recursive merged-proof (primary design — correct proof format)
 
-Two independent recursive pipelines produce two wrapper proofs. A new `pair_wrapper` circuit recursively verifies both and emits one merged UltraHonk proof. The L3 contract's `submit_merged_batch` verifies that one proof and settles via `settle_batch_merged` with batch=16 arrays.
+Two independent recursive pipelines produce two wrapper proofs. The `pair_wrapper` circuit recursively verifies both and emits one merged UltraHonk proof at `noir-recursive` target (500 fields, matching the contract's `UltraHonkZKProof` ABI). The L3 contract's `submit_merged_batch` verifies that one proof and settles via `settle_batch_merged` with batch=16 arrays.
 
 ```
                                                                                ┌─ wrapper proof₁ ─┐
@@ -369,9 +382,9 @@ Breakdown of L2 function arguments:
 | | Shared VK | Proofs | Pub inputs | Settle data | Total |
 |---|---|---|---|---|---|
 | Design A | 115 × 32 = 3,680 B | **2** × 519 × 32 = 33,216 B | 2 × 8 × 32 = 512 B | 2 × 48 × 32 = 3,072 B | **40,512 B** |
-| Design B | 115 × 32 = 3,680 B | **1** × 519 × 32 = 16,608 B | 1 × 8 × 32 = 256 B | 1 × 96 × 32 = 3,072 B | **23,648 B** |
+| Design B | 115 × 32 = 3,680 B | **1** × 500 × 32 = 16,000 B | 1 × 8 × 32 = 256 B | 1 × 96 × 32 = 3,072 B | **23,040 B** |
 
-Design B saves **one entire proof body** on calldata (−16,864 B or −42%). The settle data (nullifiers, note-hashes, deposits, withdrawals) is the same total bytes in both: Design A posts 2 × (16+16+8+8) = 96 fields, Design B posts 1 × (32+32+16+16) = 96 fields.
+Design B saves one entire proof body plus IPA overhead on calldata (−17,472 B or −43%). The settle data (nullifiers, note-hashes, deposits, withdrawals) is the same total bytes in both: Design A posts 2 × (16+16+8+8) = 96 fields, Design B posts 1 × (32+32+16+16) = 96 fields. Design B's proof is also smaller (500 fields vs 519) because it uses `noir-recursive` target which omits IPA material.
 
 The trade-off: you paid for `pair_wrapper` proving (~1 min extra) to earn that DA reduction.
 
@@ -423,15 +436,19 @@ Without this binding, `verify_honk_proof` only enforces internal `vk`/`vk_hash` 
 
 2. **Sandbox proof-verification gap**. Earlier drafts assumed the sandbox still enforced private-kernel `verify_honk_proof` calls. The newer probe suite (`step2-submit-batch-probe.ts`, plus the tail-corruption checks in `step4-full-lifecycle.ts`) shows that in the default sandbox mode (`PXE_PROVER=none`), corrupted or fabricated proofs can still be accepted, while plain Noir `assert` checks still fire. These e2e tests therefore validate contract logic and plumbing, not proof soundness.
 
-3. **Gas-receipt surfacing**. The Aztec.js version in 4.2.0-nightly.20260408 doesn't expose `gasUsed` from `.send()`. Public execution cost is reasoned structurally (loop bounds in `settle_batch*`). Adding real gas figures is a drop-in follow-up via `node.getTxReceipt(txHash)`.
+3. **Proof format alignment varies by path**. Design B (recursive) produces 500-field `noir-recursive` proofs matching the contract's `UltraHonkZKProof` ABI — this is the only path with correct format alignment. Designs A and C produce 519-field `noir-rollup` proofs; the Aztec.js SDK silently truncates the excess 19 fields (IPA claim + IPA proof) during ABI encoding. When Aztec enables real proof verification, Design B should work correctly; Designs A and C will need Aztec platform changes (RollupHonk support in MegaBuilder, or IPA-free tube proving). See [`SILENT_FAILURE_REVIEW.md`](./SILENT_FAILURE_REVIEW.md).
 
-4. **Concurrent proving for Design B needs more RAM than shipped**. step9 runs sub-batches sequentially to fit 16 GiB. With ≥ 24 GiB RAM, concurrent sub-batch proving gives ~2× speedup (edit step9 per the section above).
+4. **Gas-receipt surfacing**. The Aztec.js version in 4.2.0-nightly.20260408 doesn't expose `gasUsed` from `.send()`. Public execution cost is reasoned structurally (loop bounds in `settle_batch*`). Adding real gas figures is a drop-in follow-up via `node.getTxReceipt(txHash)`.
 
-5. **16 GiB WSL memory is required for step9**. Default WSL2 is ~50% of host RAM. Without the `.wslconfig` memory boost, `bb` OOMs during `batch_app_standalone` proving.
+5. **Concurrent proving for Design B needs more RAM than shipped**. step9 runs sub-batches sequentially to fit 16 GiB. With ≥ 24 GiB RAM, concurrent sub-batch proving gives ~2× speedup (edit step9 per the section above).
+
+6. **16 GiB WSL memory is required for step9**. Default WSL2 is ~50% of host RAM. Without the `.wslconfig` memory boost, `bb` OOMs during `batch_app_standalone` proving.
 
 ---
 
-## Path C — IVC sub-batches + pair_tube RollupHonk aggregation
+## Path C — IVC + pair_tube RollupHonk aggregation (indicative benchmark — proof format mismatch)
+
+> **Warning**: Like Design A, this path produces 519-field `noir-rollup` proofs. The contract ABI expects 500 fields. The SDK silently truncates. The client-side `pair_tube` aggregation (using `verify_rolluphonk_proof` in a standalone circuit) is sound, but the contract-level verification is not. Results below are for benchmarking only.
 
 A third approach that combines the fast IVC sub-batch proving (~4 GiB RAM per sub-batch, highly concurrent-friendly) with DA-efficient proof aggregation via a new `pair_tube` circuit.
 
@@ -467,8 +484,9 @@ The solution uses `verify_rolluphonk_proof` from `bb_proof_verification`, which 
 | **Sub-batch proving** | ~2.6 min (concurrent IVC) | ~9.8 min (sequential recursive) | **~2.8 min** (concurrent IVC) |
 | **Aggregation** | — | ~53 s pair_wrapper | **~65 s** pair_tube |
 | **Total proving** | **~2.6 min** | ~10.7 min | **~3.9 min** |
-| **L2 DA** | 40,512 B | **23,648 B** | **23,648 B** |
-| **L2 proofs** | 2 | 1 | **1** |
+| **L2 DA** | 40,512 B | **23,040 B** | **23,648 B** |
+| **L2 proofs** | 2 (519 fields each) | 1 (500 fields) | 1 (519 fields) |
+| **Proof format correct?** | No (519→500 truncation) | **Yes** (500 matches ABI) | No (519→500 truncation) |
 | **Private verify** | 2 × verify_honk_proof | 1 × verify_honk_proof | **1 × verify_honk_proof** |
 | **Public execution** | 2 × settle_batch@8 | 1 × settle_batch_merged@16 | **1 × settle_batch_merged@16** |
 | **Nonce advance** | +2 | +1 | **+1** |

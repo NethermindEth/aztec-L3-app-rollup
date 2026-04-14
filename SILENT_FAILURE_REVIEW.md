@@ -113,19 +113,21 @@ For user-deployed L3 rollup contracts to soundly verify proofs, Aztec needs at l
 
 3. **A documented, supported path for user contracts to verify proofs produced by `UltraHonkBackend`** — the current situation where `noir-rollup` produces 519 fields but contracts can only accept 500 is an API gap that has no workaround.
 
-Without one of these, any Aztec L3 rollup settling via user-deployed contracts has the same limitation: proof verification is declared in the contract but not actually enforced.
+Without one of these, IVC-based paths (Designs A and C) have no workaround for the 519/500 mismatch.
+
+**Note**: Design B (recursive pipeline) does NOT require any of the above. It stays entirely in UltraHonk land with no IPA material, so its final proof can be generated at `noir-recursive` target producing 500-field proofs that match the contract's `UltraHonkZKProof` ABI. This has been implemented and verified — see step9.
 
 ---
 
 ## Affected paths in this repo
 
-| Path | Client-side proving | Contract verification | Overall |
-|---|---|---|---|
-| **Design A** (IVC meta-batch) | Sound | Not enforced | **Blocked by platform** |
-| **Design B** (Recursive merged) | Sound | Not enforced | **Blocked by platform** |
-| **Path C** (IVC + pair_tube) | Sound | Not enforced | **Blocked by platform** |
+| Path | Client-side proving | Proof format | Contract verification | Overall |
+|---|---|---|---|---|
+| **Design A** (IVC meta-batch) | Sound | 519 fields (truncated to 500) | Not enforced | **Blocked by platform** |
+| **Design B** (Recursive merged) | Sound | **500 fields (correct)** | Not enforced (sandbox limitation) | **Format-ready** |
+| **Path C** (IVC + pair_tube) | Sound | 519 fields (truncated to 500) | Not enforced | **Blocked by platform** |
 
-All three paths are architecturally complete and produce valid proofs. They will become fully sound when Aztec resolves the contract-level proof verification gap.
+Design B is the only path with correct proof format alignment. Its proofs are 500-field `noir-recursive` UltraHonkZK, matching the contract's ABI exactly. When Aztec enables real proof verification in the private kernel, Design B should work without changes. Designs A and C require Aztec platform changes (items 1 or 2 above).
 
 ---
 

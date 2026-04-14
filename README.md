@@ -1,43 +1,12 @@
 # Aztec L3 Payment Rollup
 
-> **Proof verification limitation.** The Aztec sandbox (`PXE_PROVER=none`) does not enforce `verify_honk_proof` calls in contract private functions — the opcode is a no-op during ACIR simulation. Additionally, `UltraHonkBackend` generates 519-field `noir-rollup` proofs, but contract ABIs declare 500-field `UltraHonkZKProof` parameters; the SDK silently truncates the excess. All client-side proving and recursive aggregation is sound, but **on-chain proof verification is not enforced** on the current Aztec version. This is a platform limitation, not a bug in this repo. See [`SILENT_FAILURE_REVIEW.md`](./SILENT_FAILURE_REVIEW.md) for full details and empirical evidence.
+A ZK payment rollup that settles on Aztec L2 with real proofs. The **recursive pipeline** is the primary proving path — it produces correctly-formatted proofs for on-chain verification. An IVC pipeline is also implemented for benchmarking but has an unresolved proof format mismatch (see [IVC pipeline status](#ivc-pipeline-status) below).
 
-A ZK payment rollup that settles on Aztec L2 with real proofs end-to-end.
+> **Sandbox testing limitation.** The Aztec sandbox (`PXE_PROVER=none`) does not enforce `verify_honk_proof` calls in contract private functions — the opcode is a no-op during ACIR simulation. E2e tests validate contract logic and proof plumbing, but not proof soundness. The recursive pipeline has correct proof format alignment (500-field `noir-recursive` proofs matching the `UltraHonkZKProof` ABI), so verification should be sound once Aztec enables real proving. See [`SILENT_FAILURE_REVIEW.md`](./SILENT_FAILURE_REVIEW.md) for details.
 
-**Both proving pipelines in this repo process the same batch size:**
+## Architecture
 
-- Each batch proof covers up to **8 L3 tx slots** (`MAX_BATCH_SIZE = 8`).
-- Two pipelines differ in **how** those 8 slots get proven and compressed into a single L2-verifiable proof.
-- For handling more txs per L2 transaction (16 slot capacity via 2 sub-batches × 8), see [`BATCHING_OF_BATCHES.md`](./BATCHING_OF_BATCHES.md).
-
-## Two pipelines, identical batch size
-
-Both pipelines share the per-tx circuits (deposit / payment / withdraw / padding) and the state model (indexed nullifier tree + append-only note-hash tree, depth 20). They diverge at the batch-aggregation step, compile to different Noir artifacts, and deploy to different contracts.
-
-### IVC pipeline (batch size 8, contract: `L3IvcSettlement`)
-
-```
-User tx  -->  Per-tx proof (UltraHonk)
-              |
-              v
-           batch_app  (aggregates up to 8 txs, validates Merkle insertions)
-              |
-              v
-           IVC kernel chain (init -> tail -> hiding)
-              |
-              v
-           Chonk proof (AztecClientBackend)
-              |
-              v
-           Tube proof (UltraHonk, rollup-targeted)
-              |
-              v
-           L2 contract: submit_batch() verifies tube proof, settles state
-```
-
-Batch size is **capped at 8** by the Chonk ECCVM 32,768-row limit.
-
-### Recursive pipeline (batch size 8, contract: `L3RecursiveSettlement`)
+The recursive pipeline processes batches of up to **8 L3 tx slots** per sub-batch. Per-tx circuits (deposit / payment / withdraw / padding) are shared with the IVC pipeline. The state model uses an indexed nullifier tree + append-only note-hash tree (depth 20).
 
 ```
 User tx  -->  Per-tx proof (UltraHonk)
@@ -52,30 +21,37 @@ User tx  -->  Per-tx proof (UltraHonk)
            L2 contract: submit_batch() verifies wrapper proof, settles state
 ```
 
-No IVC kernels, no Chonk, no `AztecClientBackend`. The circuit compiles linearly up to batch=128 per `DESIGN_DECISIONS.md` §3; batch=8 is the current shipped setting to keep dev-loop proving times reasonable and allow concurrent sub-batch proving within a 16 GiB WSL memory budget (see `BATCHING_OF_BATCHES.md`).
+Contract: `L3RecursiveSettlement`. No IVC kernels, no Chonk, no `AztecClientBackend`. The circuit compiles linearly up to batch=128 per `DESIGN_DECISIONS.md` §3; batch=8 is the current setting to keep proving times reasonable within a 16 GiB memory budget.
 
-### Shared
+All proofs are generated at `noir-recursive` target, producing 500-field `UltraHonkZKProof`s that match the contract ABI.
 
-- **Per-tx circuits**: deposit, payment, withdraw, padding — identical for both pipelines.
-- **State model**: indexed nullifier tree + append-only note-hash tree (depth 20), roots committed to L2.
+## Batching: 16 slots per L2 tx
 
-## Going bigger than 8 per L2 tx
+Two sub-batches of 8 can be aggregated into a single L2 transaction via `pair_wrapper`:
 
-Both pipelines support combining **two 8-slot sub-batches into one L2 transaction** (16 slot capacity per L2 tx):
-
-- **Design A — IVC meta-batch** (`submit_two_batches`): two independent tube proofs verified in one L2 tx, two `settle_batch` calls. No new circuit.
-- **Design B — Recursive merged-proof** (`submit_merged_batch` + `pair_wrapper`): a new aggregator circuit recursively verifies two wrapper proofs → one merged UltraHonk proof, one `settle_batch_merged` call.
-- **Path C — IVC + RollupHonk aggregation** (`submit_merged_batch` + `pair_tube`): IVC sub-batches (fast, concurrent-friendly at ~4 GiB each) aggregated by `pair_tube` into a single merged proof. Uses `verify_rolluphonk_proof` to handle IPA material from tube proofs. Gets Design B's DA savings (~42% reduction) with Design A's proving speed.
-
-End-to-end tests for all three:
-
-```sh
-npx tsx tests/step8-ivc-meta-16slot.ts         # Design A: IVC meta-batch
-npx tsx tests/step9-recursive-merged-16slot.ts  # Design B: Recursive merged-proof
-npx tsx tests/step10-ivc-merged-16slot.ts       # Path C: IVC + pair_tube aggregation
+```
+sub-batch 1 (8 slots) --> batch_app_standalone --> wrapper [noir-recursive] --+
+                                                                              |
+                                                                              +--> pair_wrapper --> 1 merged proof [noir-recursive]
+                                                                              |                           |
+sub-batch 2 (8 slots) --> batch_app_standalone --> wrapper [noir-recursive] --+                           v
+                                                                                          submit_merged_batch (L3RecursiveSettlement)
+                                                                                                          |
+                                                                                          settle_batch_merged (batch=16)
+                                                                                          One Aztec L2 tx, nonce += 1
 ```
 
-See [`BATCHING_OF_BATCHES.md`](./BATCHING_OF_BATCHES.md) for architecture diagrams, reproduction steps, and side-by-side cost comparison.
+- **1 merged proof** on L2 (16,000 bytes, 500 fields)
+- **23,040 bytes DA** (43% less than posting 2 separate proofs)
+- **1 `settle_batch_merged` call** (nonce += 1)
+
+End-to-end test:
+
+```sh
+npx tsx tests/step9-recursive-merged-16slot.ts
+```
+
+See [`BATCHING_OF_BATCHES.md`](./BATCHING_OF_BATCHES.md) for architecture, reproduction steps, and measurements. See [`BATCHING_SCALING.md`](./BATCHING_SCALING.md) for extrapolation to 32 and 128 slots.
 
 ## Prerequisites
 
@@ -87,7 +63,7 @@ All pinned to `aztec v4.2.0-nightly.20260408`.
 
 ### WSL users (Windows)
 
-All commands below run inside WSL. Memory matters: the recursive pipeline's proving peaks at ~8 GiB; `batching-of-batches` step9 needs ≥ 16 GiB WSL budget. Set `%USERPROFILE%\.wslconfig`:
+All commands below run inside WSL. Memory matters: the recursive pipeline's proving peaks at ~8 GiB; batching step9 needs ≥ 16 GiB WSL budget. Set `%USERPROFILE%\.wslconfig`:
 
 ```ini
 [wsl2]
@@ -129,11 +105,11 @@ Expected `target/` contents:
 | File | Pipeline |
 |---|---|
 | `l3_deposit.json`, `l3_payment.json`, `l3_withdraw.json`, `l3_padding.json` | Shared (per-tx) |
-| `l3_batch_app.json`, `l3_init_kernel.json`, `l3_tail_kernel.json`, `l3_hiding_kernel.json`, `l3_tube.json` | IVC |
-| `l3_batch_app_standalone.json`, `l3_wrapper.json`, `l3_pair_wrapper.json` | Recursive |
-| `l3_pair_tube.json` | Path C (IVC + RollupHonk aggregation) |
-| `l3_ivc_settlement-L3IvcSettlement.json` | IVC contract |
+| `l3_batch_app_standalone.json`, `l3_wrapper.json`, `l3_pair_wrapper.json` | Recursive (primary) |
+| `l3_batch_app.json`, `l3_init_kernel.json`, `l3_tail_kernel.json`, `l3_hiding_kernel.json`, `l3_tube.json` | IVC (benchmark only) |
+| `l3_pair_tube.json` | IVC + RollupHonk aggregation (benchmark only) |
 | `l3_recursive_settlement-L3RecursiveSettlement.json` | Recursive contract |
+| `l3_ivc_settlement-L3IvcSettlement.json` | IVC contract (benchmark only) |
 | `token_contract-Token.json` | Token (L2 dep) |
 
 ## Run tests
@@ -162,33 +138,11 @@ npm install
 **Noir unit tests** (per contract):
 
 ```sh
-cd contract_ivc && aztec test && cd ..
 cd contract_recursive && aztec test && cd ..
+cd contract_ivc && aztec test && cd ..       # IVC contract (benchmark only)
 ```
 
 5/5 passing expected in each.
-
-**IVC single-batch e2e** (step4) — full lifecycle at batch=8, exercises the IVC pipeline through deposit / payment / withdraw / claim / corrupt-proof rejection:
-
-```sh
-cd tests
-npm run e2e   # runs step4-full-lifecycle.ts
-```
-
-| Step | What it tests |
-|------|---------------|
-| 1 | Deploy Token + `L3IvcSettlement` with real tube VK hash |
-| 2 | Real `deposit()` with authwit + private token transfer |
-| 3 | Payment (Alice -> Bob) with real proofs |
-| 4 | Withdrawal (Bob) with real proofs |
-| 5 | `claim_withdrawal()` on L2, balance changed |
-| 6 | Double-claim rejection |
-| 7 | Change notes (partial payment with change) |
-| 8 | Two-input spend (consume 2 notes in one tx) |
-| 9 | Multi-tx batch (skipped — see *Known limitations*) |
-| 10 | Corrupt-proof rejection (sandbox performs real proof verification) |
-
-Takes ~8-12 minutes.
 
 **Recursive single-batch e2e** (step5):
 
@@ -197,22 +151,26 @@ cd tests
 npx tsx step5-recursive-poc.ts
 ```
 
-**Batching-of-batches e2e** (step8 / step9) — 16 slot capacity per L2 tx:
+**Recursive merged-proof e2e** (step9) — 16 slot capacity per L2 tx:
 
 ```sh
 cd tests
-npx tsx step8-ivc-meta-16slot.ts       # Design A: IVC meta-batch
-npx tsx step9-recursive-merged-16slot.ts  # Design B: Recursive merged-proof
+npx tsx step9-recursive-merged-16slot.ts
 ```
 
 See [`BATCHING_OF_BATCHES.md`](./BATCHING_OF_BATCHES.md) for expected numbers and full cost comparison.
+
+**Proof verification probes** — diagnostic tests for sandbox behavior:
+
+```sh
+npm run step2   # Shape-boundary probe: confirms verify_honk_proof is a no-op
+```
 
 ### Other step tests
 
 ```sh
 npm run step0   # Private token mint + transfer (sandbox plumbing)
 npm run step1   # Real deposit() with authwit
-npm run step2   # Proof verification probe (does sandbox verify?)
 npm run step3   # submit_batch with valid public inputs
 ```
 
@@ -222,6 +180,28 @@ npm run step3   # submit_batch with valid public inputs
 cd tests
 docker compose down -v
 ```
+
+## IVC pipeline status
+
+> **The IVC pipeline has an unresolved proof format mismatch.** Tube proofs are 519-field `noir-rollup` (RollupHonk with IPA material). The contract ABI declares 500-field `UltraHonkZKProof`. The Aztec.js SDK silently truncates the excess 19 fields. This affects all IVC-based paths (Design A, Path C). See [`SILENT_FAILURE_REVIEW.md`](./SILENT_FAILURE_REVIEW.md).
+
+The IVC pipeline was built to benchmark against the recursive pipeline. It shares the same per-tx circuits and state model but uses a different aggregation path:
+
+```
+batch_app --> IVC kernel chain (init -> tail -> hiding) --> Chonk --> tube
+```
+
+Batch size is capped at 8 by the Chonk ECCVM 32,768-row limit. The tube proof cannot be generated at `noir-recursive` target (IPA material from Chonk prevents it), and `verify_rolluphonk_proof` is not supported in Aztec contract private functions (MegaBuilder limitation).
+
+**IVC benchmark tests** (proof format mismatch — results are indicative, not production-valid):
+
+```sh
+npx tsx tests/step4-full-lifecycle.ts          # IVC single-batch lifecycle
+npx tsx tests/step8-ivc-meta-16slot.ts         # Design A: 2 tube proofs, 2 settles
+npx tsx tests/step10-ivc-merged-16slot.ts      # Path C: pair_tube RollupHonk aggregation
+```
+
+These tests validate the IVC proving pipeline and contract logic, but on-chain proof verification is not enforced due to the format mismatch. The client-side proving (including pair_tube's `verify_rolluphonk_proof` in standalone circuits) is sound.
 
 ## Project structure
 
@@ -233,56 +213,51 @@ circuits/
   withdraw/              Burns L3 note, creates L2 withdrawal claim (shared)
   padding/               Fills unused batch slots, all-zero proof (shared)
 
-  # IVC pipeline (batch size 8)
-  batch_app/             Aggregates 8 txs, validates tree insertions, IVC-threaded output
+  # Recursive pipeline (primary)
+  batch_app_standalone/  Aggregates 8 txs, explicit pub outputs (no databus)
+  wrapper/               Verifies batch_app_standalone UltraHonk proof
+  pair_wrapper/          Aggregates 2 wrapper proofs -> 1 merged proof
+
+  # IVC pipeline (benchmark only — proof format mismatch, see above)
+  batch_app/             Aggregates 8 txs, IVC-threaded output (databus)
   init_kernel/           IVC: verifies batch_app (OINK proof type)
   tail_kernel/           IVC: continues fold (HN_TAIL proof type)
   hiding_kernel/         IVC: final fold, exposes public output (HN_FINAL)
-  tube/                  Compresses Chonk proof to UltraHonk for L2 verification
+  tube/                  Compresses Chonk proof to UltraHonk
+  pair_tube/             Aggregates 2 RollupHonk tube proofs via verify_rolluphonk_proof
 
-  # Recursive pipeline (batch size 8)
-  batch_app_standalone/  Aggregates 8 txs, explicit pub outputs (no databus)
-  wrapper/               Verifies batch_app_standalone UltraHonk proof for L2
-  pair_wrapper/          Aggregates 2 UltraHonk wrapper proofs -> 1 merged proof
-
-  # Path C: IVC + RollupHonk aggregation
-  pair_tube/             Aggregates 2 RollupHonk tube proofs -> 1 merged proof
-                         (uses verify_rolluphonk_proof, handles IPA material)
-
-contract_ivc/            L3IvcSettlement (batch size 8), Noir unit tests
-                         Methods: submit_batch, submit_two_batches, submit_merged_batch
-contract_recursive/      L3RecursiveSettlement (batch size 8), Noir unit tests
+contract_recursive/      L3RecursiveSettlement — primary contract
                          Methods: submit_batch, submit_merged_batch, settle_batch_merged
+contract_ivc/            L3IvcSettlement — benchmark only
+                         Methods: submit_batch, submit_two_batches, submit_merged_batch
 
 tests/
   harness/
     state.ts                         Shared state model, parameterized batch sizing
-    prover.ts                        IVC prover (buildBatchProof, computeTubeVkHash,
-                                     buildPairTubeProof, computePairTubeVkHash)
+    prover.ts                        IVC prover (buildBatchProof, buildPairTubeProof)
     prover-recursive.ts              Recursive prover (buildBatchProofRecursive,
-                                     buildPairWrapperProof, computePairWrapperVkHash)
+                                     buildPairWrapperProof)
     actions.ts                       High-level IVC test actions
-  step0-3*, step4-full-lifecycle.ts     IVC e2e tests (single-batch)
   step5-recursive-poc.ts                Recursive e2e test (single-batch)
-  step8-ivc-meta-16slot.ts              Design A: IVC meta-batch (see BATCHING_OF_BATCHES.md)
-  step9-recursive-merged-16slot.ts      Design B: Recursive merged-proof
-  step10-ivc-merged-16slot.ts           Path C: IVC + pair_tube RollupHonk aggregation
-  bench-recursive-20tx.ts,
-  bench-recursive-100tx.ts              Recursive throughput benchmarks
+  step9-recursive-merged-16slot.ts      Recursive merged-proof (16 slots)
+  step4-full-lifecycle.ts               IVC e2e (benchmark only)
+  step8-ivc-meta-16slot.ts              IVC meta-batch (benchmark only)
+  step10-ivc-merged-16slot.ts           IVC + pair_tube (benchmark only)
+  step2-submit-batch-probe.ts           Proof verification diagnostic probes
 ```
 
 ## Known limitations
 
-- **Batch size is 8 in both pipelines.**
-  - **IVC** is capped by the Chonk ECCVM 32,768-row limit.
-  - **Recursive** has no protocol cap but is kept at 8 so sub-batch proving stays around 4 GiB/prover — small enough that two sub-batches can prove concurrently within a 16 GiB WSL memory budget (the basis for `BATCHING_OF_BATCHES.md` Design A). Can be raised by editing `circuits/batch_app_standalone/src/main.nr` if you have more RAM.
-- **1 real tx per sub-batch in the harness.** The current prover harness generates all tx proofs against a single state snapshot — so each batch carries 1 real tx + 7 padding. The circuits themselves support multi-tx (exercised in the Noir unit tests with synthetic state); a prover-side refactor to chain intermediate state roots between per-tx proofs is future work.
+- **Sandbox does not verify proofs.** `verify_honk_proof` is a no-op in `PXE_PROVER=none` mode. E2e tests validate contract logic, not proof soundness. See [`SILENT_FAILURE_REVIEW.md`](./SILENT_FAILURE_REVIEW.md).
+- **IVC proof format mismatch.** Tube proofs are 519-field `noir-rollup`; contracts expect 500-field `UltraHonkZKProof`. The recursive pipeline does not have this issue.
+- **Batch size is 8.** IVC is capped by Chonk ECCVM. Recursive has no protocol cap but is kept at 8 for memory budget reasons.
+- **1 real tx per sub-batch in the harness.** The circuits support multi-tx (tested in Noir unit tests); the prover harness needs a refactor to chain intermediate state roots.
 - **No sequencer/node.** The prover is a test harness, not a production node.
 - **No forced exit.** If the operator stops, users cannot withdraw without a new operator.
-- **Contract post-processing.** `aztec compile --workspace` handles AVM transpilation and function-name-prefix stripping in one pass (replacing the legacy `aztec-nargo compile` + separate `bb-avm aztec_process` + prefix-strip script flow).
 
 ## Further reading
 
-- [`BATCHING_OF_BATCHES.md`](./BATCHING_OF_BATCHES.md) — two ways to settle 16 slot capacity in one L2 tx: IVC meta-batch vs recursive merged-proof, with architecture, reproduction, and side-by-side cost comparison.
-- [`BATCHING_SCALING.md`](./BATCHING_SCALING.md) — extrapolation to 32-slot and 128-slot targets. Three approaches (A: IVC meta-batch, B1: small sub-batches + quad aggregator, B2: binary pair_wrapper tree), with DA / mana / RAM tradeoffs and implementation roadmaps.
-- [`DESIGN_DECISIONS.md`](./DESIGN_DECISIONS.md) — DA minimization, the single-batch IVC vs recursive decision, sizing rationale.
+- [`BATCHING_OF_BATCHES.md`](./BATCHING_OF_BATCHES.md) — 16-slot batching: recursive merged-proof architecture, IVC benchmarks (indicative), reproduction steps, and cost comparison.
+- [`BATCHING_SCALING.md`](./BATCHING_SCALING.md) — extrapolation to 32 and 128 slots.
+- [`DESIGN_DECISIONS.md`](./DESIGN_DECISIONS.md) — DA minimization, IVC vs recursive rationale, sizing decisions.
+- [`SILENT_FAILURE_REVIEW.md`](./SILENT_FAILURE_REVIEW.md) — proof verification gap analysis with empirical evidence.
