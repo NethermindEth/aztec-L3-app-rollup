@@ -2,7 +2,7 @@
 
 > **Date**: 2026-04-14 (updated 2026-04-15)
 > **Aztec version**: `v4.2.0-nightly.20260408`
-> **Affects**: All proving paths — every `submit_*` method in both `L3IvcSettlement` and `L3RecursiveSettlement` (`submit_batch`, `submit_batch_16`, `submit_batch_64`, `submit_two_batches`).
+> **Affects**: All proving paths — every `submit_*` method in both contracts. `L3RecursiveSettlement`: `submit_batch`, `submit_batch_16`, `submit_batch_64`. `L3IvcSettlement`: `submit_batch`, `submit_two_batches`, `submit_merged_batch` (original pre-rename names retained on IVC).
 
 > **Environment scope**: The proof-gate no-op applies to BOTH the sandbox (`PXE_PROVER=none`) AND the TestEnvironment (`aztec test` via TXE). TXE uses the same ACIR simulator as the sandbox's PXE; `verify_honk_proof` is stubbed in both. Noir `#[test]`s calling a private function via `env.call_private(...)` with a tampered proof blob will still accept it. Contract-gate soundness cannot be tested locally at any layer; the authoritative local soundness signal is external `bb verify` (see [tests/verify-with-bb-cli.ts](./tests/verify-with-bb-cli.ts) and [tests/verify-negative-tests.ts](./tests/verify-negative-tests.ts)).
 
@@ -142,7 +142,7 @@ Design B is the only path with correct proof format alignment. Its proofs are 50
 | `step2-submit-batch-probe.ts` | Probes 1-3: verify_honk_proof is a no-op; Noir asserts work. Probe 4: SDK truncates oversized arrays. |
 | `step4-full-lifecycle.ts` | Steps 7b-7c: tail-only corruption and 519-vs-500 equivalence (confirms truncation with real proofs). |
 | `contract_ivc/src/test/*.nr` | 5/5 Noir unit tests: contract logic is correct (state chaining, deposits, withdrawals, claims). |
-| `contract_recursive/src/test/*.nr` | 5/5 Noir unit tests: same. |
+| `contract_recursive/src/test/*.nr` | 15/15 Noir unit tests: 5 lifecycle + 5 `settle_batch_16` state-machine tests + 5 `settle_batch_64` state-machine tests. |
 | `step8-ivc-meta-16slot.ts` | Design A e2e: IVC pipeline + contract settlement (proof not verified by sandbox). |
 | `step9-recursive-16slot.ts` | Design B e2e: recursive pipeline + wrapper_16 + contract settlement. |
 | `step10-ivc-merged-16slot.ts` | Path C e2e: IVC + pair_tube RollupHonk aggregation + contract settlement. |

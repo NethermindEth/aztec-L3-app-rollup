@@ -105,7 +105,8 @@ Expected `target/` contents:
 | File | Pipeline |
 |---|---|
 | `l3_deposit.json`, `l3_payment.json`, `l3_withdraw.json`, `l3_padding.json` | Shared (per-tx) |
-| `l3_batch_app_standalone.json`, `l3_wrapper.json`, `l3_wrapper_16.json` | Recursive (primary) |
+| `l3_batch_app_standalone.json`, `l3_wrapper.json` | Recursive per-sub-batch (8-slot) |
+| `l3_wrapper_16.json`, `l3_wrapper_32.json`, `l3_wrapper_64.json` | Recursive aggregators (16 / 32 / 64 slots) |
 | `l3_batch_app.json`, `l3_init_kernel.json`, `l3_tail_kernel.json`, `l3_hiding_kernel.json`, `l3_tube.json` | IVC (benchmark only) |
 | `l3_pair_tube.json` | IVC + RollupHonk aggregation (benchmark only) |
 | `l3_recursive_settlement-L3RecursiveSettlement.json` | Recursive contract |
@@ -142,7 +143,7 @@ cd contract_recursive && aztec test && cd ..
 cd contract_ivc && aztec test && cd ..       # IVC contract (benchmark only)
 ```
 
-5/5 passing expected in each.
+Expected counts: **15/15** in `contract_recursive` (5 lifecycle + 5 16-slot + 5 64-slot state-machine tests), **5/5** in `contract_ivc`.
 
 **Recursive single-batch e2e** (step5):
 
@@ -215,8 +216,10 @@ circuits/
 
   # Recursive pipeline (primary)
   batch_app_standalone/  Aggregates 8 txs, explicit pub outputs (no databus)
-  wrapper/               Verifies batch_app_standalone UltraHonk proof
-  wrapper_16/          Aggregates 2 wrapper proofs -> 1 merged proof
+  wrapper/               Verifies batch_app_standalone UltraHonk proof (8-slot)
+  wrapper_16/            Aggregates 2 wrapper proofs  -> 16-slot merged proof
+  wrapper_32/            Aggregates 2 wrapper_16 proofs -> 32-slot (intermediate)
+  wrapper_64/            Aggregates 2 wrapper_32 proofs -> 64-slot merged proof
 
   # IVC pipeline (benchmark only — proof format mismatch, see above)
   batch_app/             Aggregates 8 txs, IVC-threaded output (databus)
@@ -227,22 +230,31 @@ circuits/
   pair_tube/             Aggregates 2 RollupHonk tube proofs via verify_rolluphonk_proof
 
 contract_recursive/      L3RecursiveSettlement — primary contract
-                         Methods: submit_batch, submit_batch_16, settle_batch_16
-contract_ivc/            L3IvcSettlement — benchmark only
-                         Methods: submit_batch, submit_two_batches, submit_batch_16
+                         Methods: submit_batch (8-slot), submit_batch_16, submit_batch_64
+                                  + matching settle_batch / settle_batch_16 / settle_batch_64
+                         Immutable VK hashes: tube_vk_hash, vk_hash_16, vk_hash_32, vk_hash_64
+contract_ivc/            L3IvcSettlement — benchmark only (method names retained pre-rename)
+                         Methods: submit_batch, submit_two_batches, submit_merged_batch
 
 tests/
   harness/
     state.ts                         Shared state model, parameterized batch sizing
     prover.ts                        IVC prover (buildBatchProof, buildPairTubeProof)
     prover-recursive.ts              Recursive prover (buildBatchProofRecursive,
-                                     buildPairWrapperProof)
+                                     buildWrapper16Proof / Wrapper32Proof / Wrapper64Proof,
+                                     computeWrapper*VkHash)
+    recursive-shapes.ts              Recursive-path shape constants + boundary
+                                     assertRecursiveSubmitShape()
     actions.ts                       High-level IVC test actions
-  step5-recursive-poc.ts                Recursive e2e test (single-batch)
-  step9-recursive-16slot.ts      Recursive merged-proof (16 slots)
+  step5-recursive-poc.ts                Recursive e2e test (8-slot, single-batch)
+  step9-recursive-16slot.ts             Recursive merged-proof (16 slots)
+  step11-recursive-64slot.ts            Recursive aggregated-proof (64 slots)
   step4-full-lifecycle.ts               IVC e2e (benchmark only)
   step8-ivc-meta-16slot.ts              IVC meta-batch (benchmark only)
   step10-ivc-merged-16slot.ts           IVC + pair_tube (benchmark only)
+  verify-with-bb-cli.ts                 External bb-CLI verification, positive + artifact dump
+  verify-negative-tests.ts              Tamper matrix across all recursive levels
+  probe-chain-binding-64.ts             Contract-side inner-VK chain-binding probe (64-slot)
   probe-recursive-target.ts             Diagnostic: noir-recursive proof format validation
   step2-submit-batch-probe.ts           Proof verification diagnostic probes
 ```
