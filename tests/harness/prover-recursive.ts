@@ -24,6 +24,7 @@ import {
   type TxProofResult,
   type BatchArtifact,
 } from "./prover.js";
+import { UH_PROOF_FIELDS as PROOF_FIELDS, UH_VK_FIELDS as VK_FIELDS } from "./recursive-shapes.js";
 
 const TARGET_DIR = resolve(import.meta.dirname ?? ".", "../../target");
 // Recursive pipeline batch sizes. Must match circuits/batch_app_standalone/src/main.nr
@@ -33,10 +34,6 @@ const MAX_NOTES_PER_TX = 2;
 const MAX_OUTPUTS_PER_TX = 2;
 const BATCH_NULLIFIERS_COUNT = RECURSIVE_BATCH_SIZING.batchNullifiersCount;   // 16
 const BATCH_NOTE_HASHES_COUNT = RECURSIVE_BATCH_SIZING.batchNoteHashesCount;  // 16
-
-// Proof / VK field lengths (shared across buildBatchProofRecursive and buildPairWrapperProof).
-const VK_FIELDS = 115;
-const PROOF_FIELDS = 500;
 
 // -------------------------------------------------------------------------
 // Circuit loading (cached)
@@ -93,29 +90,16 @@ function zeroSibs(): string[] { return new Array(20).fill("0"); }
 //
 // Shared logic with buildBatchProof up through batch_app witness execution,
 // then diverges: UltraHonk prove batch_app -> execute wrapper -> prove wrapper.
+// The wrapper is always proved at "noir-recursive" target (500-field
+// UltraHonkZK proofs matching the contract's UltraHonkZKProof ABI), which
+// is the only format consumable by both submit_batch and wrapper_16.
 // -------------------------------------------------------------------------
-
-export interface BuildRecursiveOptions {
-  /**
-   * Verifier target for the wrapper proof.
-   *
-   * - "noir-recursive" (default): produces 500-field UltraHonkZK proofs that
-   *   match the contract's UltraHonkZKProof ABI. Use for both direct L2
-   *   submission (submit_batch) and pair_wrapper aggregation.
-   * - "noir-rollup": produces 519-field RollupHonk proofs with IPA material.
-   *   NOT recommended — the contract ABI declares [Field; 500] and the SDK
-   *   silently truncates the extra 19 fields. See SILENT_FAILURE_REVIEW.md.
-   */
-  wrapperTarget?: "noir-rollup" | "noir-recursive";
-}
 
 export async function buildBatchProofRecursive(
   api: Barretenberg,
   state: TestL3State,
   realSlots: TxProofResult[],
-  options: BuildRecursiveOptions = {},
 ): Promise<BatchArtifact> {
-  const wrapperTarget = options.wrapperTarget ?? "noir-recursive";
   if (realSlots.length > MAX_BATCH_SIZE) throw new Error("too many slots");
 
   const oldStateRoot = state.stateRoot;
@@ -264,26 +248,24 @@ export async function buildBatchProofRecursive(
   });
   console.log("    wrapper executed");
 
-  // 6. Prove wrapper as UltraHonk targeted according to caller preference.
-  //    - noir-rollup: direct L2 verification via submit_batch.
-  //    - noir-recursive: consumed by pair_wrapper for proof aggregation.
-  console.log(`    Proving wrapper (UltraHonk, ${wrapperTarget})...`);
+  // 6. Prove wrapper at noir-recursive target.
+  //    Produces 500-field UltraHonkZK proofs matching the contract's
+  //    UltraHonkZKProof ABI — consumed by submit_batch directly and by
+  //    wrapper_16 for proof aggregation.
+  console.log("    Proving wrapper (UltraHonk, noir-recursive)...");
   const wrapperBackend = new UltraHonkBackend(wrapperCircuit.bytecode, api);
-  const wrapperProofData = await wrapperBackend.generateProof(wrapperWitness, { verifierTarget: wrapperTarget });
-  const wrapperVk = await wrapperBackend.getVerificationKey({ verifierTarget: wrapperTarget });
+  const wrapperProofData = await wrapperBackend.generateProof(wrapperWitness, { verifierTarget: "noir-recursive" });
+  const wrapperVk = await wrapperBackend.getVerificationKey({ verifierTarget: "noir-recursive" });
   const wrapperProofFields = wrapperProofData.proof.length / 32;
   console.log(`    wrapper proof: ${wrapperProofData.proof.length} bytes (${wrapperProofFields} fields)`);
 
-  // Guard against silent target regression: noir-recursive must produce 500-field proofs.
-  if (wrapperTarget === "noir-recursive" && wrapperProofFields !== 500) {
-    throw new Error(
-      `wrapper proof has ${wrapperProofFields} fields (expected 500 for noir-recursive). ` +
-      `If 519, the target may have regressed to noir-rollup. See SILENT_FAILURE_REVIEW.md.`,
-    );
+  // Shape invariant: UltraHonkZK wrapper proofs are PROOF_FIELDS fields.
+  if (wrapperProofFields !== PROOF_FIELDS) {
+    throw new Error(`wrapper proof has ${wrapperProofFields} fields (expected ${PROOF_FIELDS})`);
   }
 
   // 7. Verify locally.
-  const wrapperValid = await wrapperBackend.verifyProof(wrapperProofData, { verifierTarget: wrapperTarget });
+  const wrapperValid = await wrapperBackend.verifyProof(wrapperProofData, { verifierTarget: "noir-recursive" });
   console.log(`    wrapper verified: ${wrapperValid}`);
 
   // Return same BatchArtifact shape -- tubeProof/tubeVk are the wrapper equivalents.
@@ -319,16 +301,14 @@ export async function computeWrapperVkHash(api: Barretenberg): Promise<{ vkHash:
 }
 
 // -------------------------------------------------------------------------
-// Compute pair_wrapper VK hash.
+// Compute wrapper_16 VK hash.
 //
-// Two wrapper verification targets are relevant to pair_wrapper:
-//   - The wrapper VK pair_wrapper verifies internally must be the "noir-recursive"
-//     wrapper VK (the one used to recursively verify inside another circuit).
-//   - The pair_wrapper's OWN proof is "noir-rollup"-targeted (L2-verifiable).
+// Both wrapper_16's inner verify_honk_proof VK and its own output proof
+// are at noir-recursive target (500-field UltraHonkZK).
 // -------------------------------------------------------------------------
 
-export async function computePairWrapperVkHash(api: Barretenberg): Promise<{ vkHash: Fr; vk: Uint8Array }> {
-  const circuit = loadCircuit("pair_wrapper");
+export async function computeWrapper16VkHash(api: Barretenberg): Promise<{ vkHash: Fr; vk: Uint8Array }> {
+  const circuit = loadCircuit("wrapper_16");
   const backend = new UltraHonkBackend(circuit.bytecode, api);
   const vk = await backend.getVerificationKey({ verifierTarget: "noir-recursive" });
   const vkFields = vkToFields(vk);
@@ -337,48 +317,49 @@ export async function computePairWrapperVkHash(api: Barretenberg): Promise<{ vkH
 }
 
 // -------------------------------------------------------------------------
-// buildPairWrapperProof
+// buildWrapper16Proof
 //
 // Takes two BatchArtifacts produced by buildBatchProofRecursive (A then B,
-// where B's oldStateRoot == A's newStateRoot), runs the pair_wrapper circuit
+// where B's oldStateRoot == A's newStateRoot), runs the wrapper_16 circuit
 // to recursively verify both wrapper proofs and merge their settle data,
-// returns a single noir-rollup-targeted UltraHonk proof plus its VK and the
-// merged 8-field public inputs suitable for the L2 submit_merged_batch call.
+// returns a single noir-recursive-targeted UltraHonk proof (500 fields) plus
+// its VK and the merged 8-field public inputs suitable for the L2
+// submit_batch_16 call.
 // -------------------------------------------------------------------------
 
-export interface PairWrapperArtifact {
-  pairProof: Uint8Array;
-  pairVk: Uint8Array;
+export interface Wrapper16Artifact {
+  w16Proof: Uint8Array;
+  w16Vk: Uint8Array;
   mergedPublicInputs: string[]; // 8 fields -- BatchOutput shape, merged
-  // Concatenated settle arrays (ready to pass to submit_merged_batch):
+  // Concatenated settle arrays (ready to pass to submit_batch_16):
   mergedNullifiers: Fr[];       // 32 fields
   mergedNoteHashes: Fr[];       // 32 fields
   mergedDeposits: Fr[];         // 16 fields
   mergedWithdrawals: Fr[];      // 16 fields
 }
 
-export async function buildPairWrapperProof(
+export async function buildWrapper16Proof(
   api: Barretenberg,
   artifactA: BatchArtifact,
   artifactB: BatchArtifact,
-): Promise<PairWrapperArtifact> {
+): Promise<Wrapper16Artifact> {
   // 1. Sanity: both batches must share the same wrapper VK.
-  //    Caller must have produced both artifacts with wrapperTarget="noir-recursive"
-  //    via buildBatchProofRecursive (otherwise pair_wrapper's inner verify_honk_proof
-  //    won't accept them).
+  //    buildBatchProofRecursive always produces noir-recursive wrappers, so this
+  //    holds by construction; the byte-equality check guards against callers
+  //    assembling BatchArtifacts by hand with mismatched VKs.
   if (artifactA.tubeVk.length !== artifactB.tubeVk.length) {
-    throw new Error("buildPairWrapperProof: wrapper VK byte lengths differ");
+    throw new Error("buildWrapper16Proof: wrapper VK byte lengths differ");
   }
   for (let i = 0; i < artifactA.tubeVk.length; i++) {
     if (artifactA.tubeVk[i] !== artifactB.tubeVk[i]) {
-      throw new Error("buildPairWrapperProof: wrapper VKs differ at byte " + i);
+      throw new Error("buildWrapper16Proof: wrapper VKs differ at byte " + i);
     }
   }
 
   // 2. Sanity: state-root chain.
   if (artifactA.newStateRoot.toBigInt() !== artifactB.oldStateRoot.toBigInt()) {
     throw new Error(
-      `buildPairWrapperProof: state chain broken: A.new=${artifactA.newStateRoot} B.old=${artifactB.oldStateRoot}`,
+      `buildWrapper16Proof: state chain broken: A.new=${artifactA.newStateRoot} B.old=${artifactB.oldStateRoot}`,
     );
   }
 
@@ -400,20 +381,22 @@ export async function buildPairWrapperProof(
     ...artifactB.settleInputs.withdrawalClaims,
   ];
 
-  // 4. Hashes of merged arrays (match pair_wrapper's in-circuit poseidon2).
+  // 4. Hashes of merged arrays (match wrapper_16's in-circuit poseidon2).
   const mergedNullifiersHash = await p2h(mergedNullifiers);
   const mergedNoteHashesHash = await p2h(mergedNoteHashes);
   const mergedDepositsHash = await p2h(mergedDeposits);
   const mergedWithdrawalsHash = await p2h(mergedWithdrawals);
 
-  // 5. Wrapper VK hash (the VK that pair_wrapper's verify_honk_proof checks against).
-  //    artifactA.tubeVk is the wrapper VK produced at noir-recursive target.
+  // 5. Wrapper VK hash (the VK that wrapper_16's verify_honk_proof checks
+  //    against). Also exposed as wrapper_16's 9th public output, which
+  //    the contract asserts == committed tube_vk_hash in submit_batch_16
+  //    (inner-VK substitution hardening).
   const wrapperVkFields = vkToFields(artifactA.tubeVk);
   const wrapperVkHash = await p2h(wrapperVkFields);
 
-  // 6. Execute pair_wrapper circuit.
-  console.log("    Executing pair_wrapper...");
-  const pairCircuit = loadCircuit("pair_wrapper");
+  // 6. Execute wrapper_16 circuit.
+  console.log("    Executing wrapper_16...");
+  const pairCircuit = loadCircuit("wrapper_16");
   const pairNoir = new Noir(pairCircuit);
 
   const { witness: pairWitness } = await pairNoir.execute({
@@ -444,35 +427,288 @@ export async function buildPairWrapperProof(
     merged_withdrawal_claims_hash: f2s(mergedWithdrawalsHash),
     nullifier_tree_start_index: f2s(artifactA.nullifierTreeStartIndex),
     note_hash_tree_start_index: f2s(artifactA.noteHashTreeStartIndex),
+    // New 9th public input: the wrapper VK hash the two inner proofs were
+    // verified under. The contract's submit_batch_16 binds this to its
+    // committed tube_vk_hash (inner-VK substitution hardening).
+    out_wrapper_vk_hash: f2s(wrapperVkHash),
   });
-  console.log("    pair_wrapper executed");
+  console.log("    wrapper_16 executed");
 
-  // 7. Prove pair_wrapper at noir-recursive target for L2 submission.
-  //    This produces 500-field UltraHonkZK proofs matching the contract's ABI.
-  //    (noir-rollup would produce 519-field RollupHonk proofs that the SDK
-  //    silently truncates — see SILENT_FAILURE_REVIEW.md.)
-  console.log("    Proving pair_wrapper (UltraHonk, noir-recursive)...");
+  // 7. Prove wrapper_16 at noir-recursive target for L2 submission.
+  //    Produces 500-field UltraHonkZK proofs matching the contract's ABI.
+  console.log("    Proving wrapper_16 (UltraHonk, noir-recursive)...");
   const pairBackend = new UltraHonkBackend(pairCircuit.bytecode, api);
-  const pairProofData = await pairBackend.generateProof(pairWitness, { verifierTarget: "noir-recursive" });
-  const pairVk = await pairBackend.getVerificationKey({ verifierTarget: "noir-recursive" });
-  const pairProofFields = pairProofData.proof.length / 32;
-  console.log(`    pair_wrapper proof: ${pairProofData.proof.length} bytes (${pairProofFields} fields)`);
+  const w16ProofData = await pairBackend.generateProof(pairWitness, { verifierTarget: "noir-recursive" });
+  const w16Vk = await pairBackend.getVerificationKey({ verifierTarget: "noir-recursive" });
+  const w16ProofFields = w16ProofData.proof.length / 32;
+  console.log(`    wrapper_16 proof: ${w16ProofData.proof.length} bytes (${w16ProofFields} fields)`);
 
-  // Guard: merged proof must be 500 fields for contract ABI compatibility.
-  if (pairProofFields !== 500) {
+  // Shape invariant: UltraHonkZK merged proof is PROOF_FIELDS fields.
+  if (w16ProofFields !== PROOF_FIELDS) {
+    throw new Error(`wrapper_16 proof has ${w16ProofFields} fields (expected ${PROOF_FIELDS})`);
+  }
+
+  const pairValid = await pairBackend.verifyProof(w16ProofData, { verifierTarget: "noir-recursive" });
+  console.log(`    wrapper_16 verified: ${pairValid}`);
+
+  return {
+    w16Proof: w16ProofData.proof,
+    w16Vk,
+    mergedPublicInputs: w16ProofData.publicInputs,
+    mergedNullifiers,
+    mergedNoteHashes,
+    mergedDeposits,
+    mergedWithdrawals,
+  };
+}
+
+// -------------------------------------------------------------------------
+// Compute wrapper_32 VK hash (shared by wrapper_64 internally).
+// -------------------------------------------------------------------------
+
+export async function computeWrapper32VkHash(api: Barretenberg): Promise<{ vkHash: Fr; vk: Uint8Array }> {
+  const circuit = loadCircuit("wrapper_32");
+  const backend = new UltraHonkBackend(circuit.bytecode, api);
+  const vk = await backend.getVerificationKey({ verifierTarget: "noir-recursive" });
+  const vkFields = vkToFields(vk);
+  const vkHash = await p2h(vkFields);
+  return { vkHash, vk };
+}
+
+// -------------------------------------------------------------------------
+// Compute wrapper_64 VK hash (what the contract binds for submit_batch_64).
+// -------------------------------------------------------------------------
+
+export async function computeWrapper64VkHash(api: Barretenberg): Promise<{ vkHash: Fr; vk: Uint8Array }> {
+  const circuit = loadCircuit("wrapper_64");
+  const backend = new UltraHonkBackend(circuit.bytecode, api);
+  const vk = await backend.getVerificationKey({ verifierTarget: "noir-recursive" });
+  const vkFields = vkToFields(vk);
+  const vkHash = await p2h(vkFields);
+  return { vkHash, vk };
+}
+
+// -------------------------------------------------------------------------
+// buildWrapper32Proof
+//
+// Takes two Wrapper16Artifacts (each a 16-slot merged batch), runs the
+// wrapper_32 circuit to verify both and merge their arrays, returns
+// a single noir-recursive-targeted UltraHonk proof (500 fields) with
+// 32-slot-merged public inputs.
+// -------------------------------------------------------------------------
+
+export interface Wrapper32Artifact {
+  w32Proof: Uint8Array;
+  w32Vk: Uint8Array;
+  mergedPublicInputs: string[];      // 8 fields (BatchOutput shape)
+  mergedNullifiers: Fr[];            // 64 fields
+  mergedNoteHashes: Fr[];            // 64 fields
+  mergedDeposits: Fr[];              // 32 fields
+  mergedWithdrawals: Fr[];           // 32 fields
+  // Pass through for state-chain construction at the quad level:
+  oldStateRoot: Fr;
+  newStateRoot: Fr;
+  nullifierTreeStartIndex: Fr;
+  noteHashTreeStartIndex: Fr;
+}
+
+export async function buildWrapper32Proof(
+  api: Barretenberg,
+  mergedA: Wrapper16Artifact,
+  mergedB: Wrapper16Artifact,
+): Promise<Wrapper32Artifact> {
+  // 1. Sanity: both halves must have been produced by the same wrapper_16 VK.
+  //    buildWrapper16Proof always proves at noir-recursive, so this holds by
+  //    construction; byte-equality guard against caller-assembled artifacts.
+  // 2. State-root chain: B's old == A's new.
+  //    (Encoded in mergedPublicInputs[0]/[1].)
+  if (mergedA.mergedPublicInputs[1] !== mergedB.mergedPublicInputs[0]) {
     throw new Error(
-      `pair_wrapper proof has ${pairProofFields} fields (expected 500). ` +
-      `If 519, the target may have regressed to noir-rollup. See SILENT_FAILURE_REVIEW.md.`,
+      `buildWrapper32Proof: state chain broken: A.new=${mergedA.mergedPublicInputs[1]} B.old=${mergedB.mergedPublicInputs[0]}`,
     );
   }
 
-  const pairValid = await pairBackend.verifyProof(pairProofData, { verifierTarget: "noir-recursive" });
-  console.log(`    pair_wrapper verified: ${pairValid}`);
+  // 3. Merge settle arrays (A then B).
+  const mergedNullifiers = [...mergedA.mergedNullifiers, ...mergedB.mergedNullifiers];
+  const mergedNoteHashes = [...mergedA.mergedNoteHashes, ...mergedB.mergedNoteHashes];
+  const mergedDeposits = [...mergedA.mergedDeposits, ...mergedB.mergedDeposits];
+  const mergedWithdrawals = [...mergedA.mergedWithdrawals, ...mergedB.mergedWithdrawals];
+
+  // 4. Merged-hashes and wrapper_16 VK hash (for the witness).
+  const mergedNullifiersHash = await p2h(mergedNullifiers);
+  const mergedNoteHashesHash = await p2h(mergedNoteHashes);
+  const mergedDepositsHash = await p2h(mergedDeposits);
+  const mergedWithdrawalsHash = await p2h(mergedWithdrawals);
+  const w16VkHash = await p2h(vkToFields(mergedA.w16Vk));
+
+  // 5. Execute wrapper_32.
+  console.log("    Executing wrapper_32...");
+  const ppCircuit = loadCircuit("wrapper_32");
+  const ppNoir = new Noir(ppCircuit);
+
+  const { witness: ppWitness } = await ppNoir.execute({
+    w16_vk: bytesToFieldStrings(mergedA.w16Vk, VK_FIELDS),
+    w16_vk_hash: f2s(w16VkHash),
+
+    w16_proof_a: bytesToFieldStrings(mergedA.w16Proof, PROOF_FIELDS),
+    w16_public_inputs_a: mergedA.mergedPublicInputs,
+
+    w16_proof_b: bytesToFieldStrings(mergedB.w16Proof, PROOF_FIELDS),
+    w16_public_inputs_b: mergedB.mergedPublicInputs,
+
+    nullifiers_a: mergedA.mergedNullifiers.map(f2s),
+    note_hashes_a: mergedA.mergedNoteHashes.map(f2s),
+    deposits_a: mergedA.mergedDeposits.map(f2s),
+    withdrawals_a: mergedA.mergedWithdrawals.map(f2s),
+
+    nullifiers_b: mergedB.mergedNullifiers.map(f2s),
+    note_hashes_b: mergedB.mergedNoteHashes.map(f2s),
+    deposits_b: mergedB.mergedDeposits.map(f2s),
+    withdrawals_b: mergedB.mergedWithdrawals.map(f2s),
+
+    old_state_root: mergedA.mergedPublicInputs[0],
+    new_state_root: mergedB.mergedPublicInputs[1],
+    merged_nullifiers_hash: f2s(mergedNullifiersHash),
+    merged_note_hashes_hash: f2s(mergedNoteHashesHash),
+    merged_deposit_nullifiers_hash: f2s(mergedDepositsHash),
+    merged_withdrawal_claims_hash: f2s(mergedWithdrawalsHash),
+    nullifier_tree_start_index: mergedA.mergedPublicInputs[6],
+    note_hash_tree_start_index: mergedA.mergedPublicInputs[7],
+    // Inner-VK-chain propagation (PI[8] of wrapper_16 is wrapper_vk_hash;
+    // both halves must agree -- circuit enforces, we supply the shared value).
+    out_wrapper_vk_hash: mergedA.mergedPublicInputs[8],
+    out_w16_vk_hash: f2s(w16VkHash),
+  });
+  console.log("    wrapper_32 executed");
+
+  // 6. Prove at noir-recursive (consumed by wrapper_64).
+  console.log("    Proving wrapper_32 (UltraHonk, noir-recursive)...");
+  const ppBackend = new UltraHonkBackend(ppCircuit.bytecode, api);
+  const w32ProofData = await ppBackend.generateProof(ppWitness, { verifierTarget: "noir-recursive" });
+  const w32Vk = await ppBackend.getVerificationKey({ verifierTarget: "noir-recursive" });
+  const w32ProofFields = w32ProofData.proof.length / 32;
+  console.log(`    wrapper_32 proof: ${w32ProofData.proof.length} bytes (${w32ProofFields} fields)`);
+  if (w32ProofFields !== PROOF_FIELDS) {
+    throw new Error(`wrapper_32 proof has ${w32ProofFields} fields (expected ${PROOF_FIELDS})`);
+  }
+  const ppValid = await ppBackend.verifyProof(w32ProofData, { verifierTarget: "noir-recursive" });
+  console.log(`    wrapper_32 verified: ${ppValid}`);
 
   return {
-    pairProof: pairProofData.proof,
-    pairVk,
-    mergedPublicInputs: pairProofData.publicInputs,
+    w32Proof: w32ProofData.proof,
+    w32Vk,
+    mergedPublicInputs: w32ProofData.publicInputs,
+    mergedNullifiers,
+    mergedNoteHashes,
+    mergedDeposits,
+    mergedWithdrawals,
+    oldStateRoot: new Fr(BigInt(mergedA.mergedPublicInputs[0])),
+    newStateRoot: new Fr(BigInt(mergedB.mergedPublicInputs[1])),
+    nullifierTreeStartIndex: new Fr(BigInt(mergedA.mergedPublicInputs[6])),
+    noteHashTreeStartIndex: new Fr(BigInt(mergedA.mergedPublicInputs[7])),
+  };
+}
+
+// -------------------------------------------------------------------------
+// buildWrapper64Proof
+//
+// Takes two Wrapper32Artifacts (each a 32-slot doubly-merged batch),
+// runs the wrapper_64 circuit to verify both and merge their arrays,
+// returns a single noir-recursive-targeted UltraHonk proof (500 fields)
+// with 64-slot-merged public inputs — the proof submit_batch_64 accepts.
+// -------------------------------------------------------------------------
+
+export interface Wrapper64Artifact {
+  w64Proof: Uint8Array;
+  w64Vk: Uint8Array;
+  mergedPublicInputs: string[];      // 8 fields
+  mergedNullifiers: Fr[];            // 128 fields
+  mergedNoteHashes: Fr[];            // 128 fields
+  mergedDeposits: Fr[];              // 64 fields
+  mergedWithdrawals: Fr[];           // 64 fields
+}
+
+export async function buildWrapper64Proof(
+  api: Barretenberg,
+  ppA: Wrapper32Artifact,
+  ppB: Wrapper32Artifact,
+): Promise<Wrapper64Artifact> {
+  // State-root chain.
+  if (ppA.mergedPublicInputs[1] !== ppB.mergedPublicInputs[0]) {
+    throw new Error(
+      `buildWrapper64Proof: state chain broken: A.new=${ppA.mergedPublicInputs[1]} B.old=${ppB.mergedPublicInputs[0]}`,
+    );
+  }
+
+  // Merge (A then B).
+  const mergedNullifiers = [...ppA.mergedNullifiers, ...ppB.mergedNullifiers];
+  const mergedNoteHashes = [...ppA.mergedNoteHashes, ...ppB.mergedNoteHashes];
+  const mergedDeposits = [...ppA.mergedDeposits, ...ppB.mergedDeposits];
+  const mergedWithdrawals = [...ppA.mergedWithdrawals, ...ppB.mergedWithdrawals];
+
+  const mergedNullifiersHash = await p2h(mergedNullifiers);
+  const mergedNoteHashesHash = await p2h(mergedNoteHashes);
+  const mergedDepositsHash = await p2h(mergedDeposits);
+  const mergedWithdrawalsHash = await p2h(mergedWithdrawals);
+  const w32VkHash = await p2h(vkToFields(ppA.w32Vk));
+
+  console.log("    Executing wrapper_64...");
+  const quadCircuit = loadCircuit("wrapper_64");
+  const quadNoir = new Noir(quadCircuit);
+
+  const { witness: quadWitness } = await quadNoir.execute({
+    w32_vk: bytesToFieldStrings(ppA.w32Vk, VK_FIELDS),
+    w32_vk_hash: f2s(w32VkHash),
+
+    w32_proof_a: bytesToFieldStrings(ppA.w32Proof, PROOF_FIELDS),
+    w32_public_inputs_a: ppA.mergedPublicInputs,
+
+    w32_proof_b: bytesToFieldStrings(ppB.w32Proof, PROOF_FIELDS),
+    w32_public_inputs_b: ppB.mergedPublicInputs,
+
+    nullifiers_a: ppA.mergedNullifiers.map(f2s),
+    note_hashes_a: ppA.mergedNoteHashes.map(f2s),
+    deposits_a: ppA.mergedDeposits.map(f2s),
+    withdrawals_a: ppA.mergedWithdrawals.map(f2s),
+
+    nullifiers_b: ppB.mergedNullifiers.map(f2s),
+    note_hashes_b: ppB.mergedNoteHashes.map(f2s),
+    deposits_b: ppB.mergedDeposits.map(f2s),
+    withdrawals_b: ppB.mergedWithdrawals.map(f2s),
+
+    old_state_root: ppA.mergedPublicInputs[0],
+    new_state_root: ppB.mergedPublicInputs[1],
+    merged_nullifiers_hash: f2s(mergedNullifiersHash),
+    merged_note_hashes_hash: f2s(mergedNoteHashesHash),
+    merged_deposit_nullifiers_hash: f2s(mergedDepositsHash),
+    merged_withdrawal_claims_hash: f2s(mergedWithdrawalsHash),
+    nullifier_tree_start_index: ppA.mergedPublicInputs[6],
+    note_hash_tree_start_index: ppA.mergedPublicInputs[7],
+    // Full inner-VK-chain propagation: wrapper_32's PI[8]/PI[9] are
+    // wrapper_vk_hash / pair_vk_hash. Both halves must agree (circuit
+    // enforces); we propagate both plus our own pp_vk_hash as PI[10].
+    out_wrapper_vk_hash: ppA.mergedPublicInputs[8],
+    out_w16_vk_hash: ppA.mergedPublicInputs[9],
+    out_w32_vk_hash: f2s(w32VkHash),
+  });
+  console.log("    wrapper_64 executed");
+
+  console.log("    Proving wrapper_64 (UltraHonk, noir-recursive)...");
+  const quadBackend = new UltraHonkBackend(quadCircuit.bytecode, api);
+  const w64ProofData = await quadBackend.generateProof(quadWitness, { verifierTarget: "noir-recursive" });
+  const w64Vk = await quadBackend.getVerificationKey({ verifierTarget: "noir-recursive" });
+  const w64ProofFields = w64ProofData.proof.length / 32;
+  console.log(`    wrapper_64 proof: ${w64ProofData.proof.length} bytes (${w64ProofFields} fields)`);
+  if (w64ProofFields !== PROOF_FIELDS) {
+    throw new Error(`wrapper_64 proof has ${w64ProofFields} fields (expected ${PROOF_FIELDS})`);
+  }
+  const quadValid = await quadBackend.verifyProof(w64ProofData, { verifierTarget: "noir-recursive" });
+  console.log(`    wrapper_64 verified: ${quadValid}`);
+
+  return {
+    w64Proof: w64ProofData.proof,
+    w64Vk,
+    mergedPublicInputs: w64ProofData.publicInputs,
     mergedNullifiers,
     mergedNoteHashes,
     mergedDeposits,

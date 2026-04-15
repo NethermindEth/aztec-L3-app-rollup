@@ -1,30 +1,30 @@
-// pair_wrapper -- recursive UltraHonk aggregator for 2 wrapper proofs.
+// wrapper_16 -- recursive UltraHonk aggregator for 2 wrapper proofs.
+//
+// Level 1 of the aggregation tree. Consumed by submit_batch_16 directly for
+// 16-slot L2 submission, or by wrapper_32 as the next aggregation level.
 //
 // Verifies two wrapper proofs, re-feeds both batches' settle-data arrays so
-// that their poseidon2 hashes can be cross-checked, chains the state roots and
-// tree indices, and exposes merged batch=16-equivalent public inputs.
+// that their poseidon2 hashes can be cross-checked, chains the state roots
+// and tree indices, and exposes merged batch=16 public inputs.
 //
 // The output proof is an UltraHonk proof that attests to one combined state
 // transition from (A.old_state_root, A.null_start, A.nh_start) to
 // (B.new_state_root, B.null_start + B.null_count, B.nh_start + B.nh_count).
-//
-// Emitted public inputs mirror the BatchOutput schema (8 fields), sized for
-// the combined 16-tx merged batch.
 
 use l3_types::poseidon2_hash;
 use bb_proof_verification::{verify_honk_proof, UltraHonkVerificationKey, UltraHonkZKProof};
 
-// These MUST match circuits/batch_app_standalone globals (batch=8):
+// Inner wrapper sizes (MUST match circuits/batch_app_standalone globals):
 global SUB_BATCH_SIZE: u32 = 8;
 global SUB_BATCH_NULLIFIERS: u32 = 16;  // SUB_BATCH_SIZE * 2
 global SUB_BATCH_NOTE_HASHES: u32 = 16; // SUB_BATCH_SIZE * 2
 
-// Merged-batch array sizes (doubled):
-global MERGED_BATCH_SIZE: u32 = 16;
-global MERGED_BATCH_NULLIFIERS: u32 = 32;
-global MERGED_BATCH_NOTE_HASHES: u32 = 32;
+// Output (16-slot merged) array sizes:
+global BATCH_16_SIZE: u32 = 16;
+global BATCH_16_NULLIFIERS: u32 = 32;
+global BATCH_16_NOTE_HASHES: u32 = 32;
 
-// Wrapper BatchOutput layout (shared between A and B wrapper proofs):
+// BatchOutput layout (8 fields):
 //   [0] old_state_root
 //   [1] new_state_root
 //   [2] nullifiers_batch_hash
@@ -35,17 +35,21 @@ global MERGED_BATCH_NOTE_HASHES: u32 = 32;
 //   [7] note_hash_tree_start_index
 global WRAPPER_PUB_COUNT: u32 = 8;
 
+// wrapper_16 outputs 9 fields: 8 BatchOutput + 1 wrapper_vk_hash binding.
+// The contract's submit_batch_16 asserts public_inputs[8] matches its
+// committed tube_vk_hash (inner-VK substitution hardening).
+
 fn main(
     // --- private inputs ---
-    // Shared wrapper VK (both sub-batches use the same wrapper circuit).
+    // Shared wrapper VK (both halves use the same wrapper circuit).
     wrapper_vk: UltraHonkVerificationKey,
     wrapper_vk_hash: Field,
 
-    // Batch A wrapper proof + its public inputs.
+    // Half A wrapper proof + its public inputs.
     wrapper_proof_a: UltraHonkZKProof,
     wrapper_public_inputs_a: [Field; WRAPPER_PUB_COUNT],
 
-    // Batch B wrapper proof + its public inputs.
+    // Half B wrapper proof + its public inputs.
     wrapper_proof_b: UltraHonkZKProof,
     wrapper_public_inputs_b: [Field; WRAPPER_PUB_COUNT],
 
@@ -60,7 +64,7 @@ fn main(
     deposits_b: [Field; SUB_BATCH_SIZE],
     withdrawals_b: [Field; SUB_BATCH_SIZE],
 
-    // --- public outputs (batch=16 merged shape, mirrors BatchOutput) ---
+    // --- public outputs (16-slot merged shape + inner VK hash) ---
     old_state_root: pub Field,
     new_state_root: pub Field,
     merged_nullifiers_hash: pub Field,
@@ -69,6 +73,8 @@ fn main(
     merged_withdrawal_claims_hash: pub Field,
     nullifier_tree_start_index: pub Field,
     note_hash_tree_start_index: pub Field,
+    // Bound to contract's tube_vk_hash via submit_batch_16:
+    out_wrapper_vk_hash: pub Field,
 ) {
     // 1. Verify both wrapper proofs against the shared VK.
     verify_honk_proof(wrapper_vk, wrapper_proof_a, wrapper_public_inputs_a, wrapper_vk_hash);
@@ -77,45 +83,45 @@ fn main(
     // 2. Re-fed arrays must match each wrapper's committed hashes.
     assert(
         poseidon2_hash(nullifiers_a) == wrapper_public_inputs_a[2],
-        "pair: nullifiers_a hash mismatch",
+        "wrapper_16: nullifiers_a hash mismatch",
     );
     assert(
         poseidon2_hash(note_hashes_a) == wrapper_public_inputs_a[3],
-        "pair: note_hashes_a hash mismatch",
+        "wrapper_16: note_hashes_a hash mismatch",
     );
     assert(
         poseidon2_hash(deposits_a) == wrapper_public_inputs_a[4],
-        "pair: deposits_a hash mismatch",
+        "wrapper_16: deposits_a hash mismatch",
     );
     assert(
         poseidon2_hash(withdrawals_a) == wrapper_public_inputs_a[5],
-        "pair: withdrawals_a hash mismatch",
+        "wrapper_16: withdrawals_a hash mismatch",
     );
 
     assert(
         poseidon2_hash(nullifiers_b) == wrapper_public_inputs_b[2],
-        "pair: nullifiers_b hash mismatch",
+        "wrapper_16: nullifiers_b hash mismatch",
     );
     assert(
         poseidon2_hash(note_hashes_b) == wrapper_public_inputs_b[3],
-        "pair: note_hashes_b hash mismatch",
+        "wrapper_16: note_hashes_b hash mismatch",
     );
     assert(
         poseidon2_hash(deposits_b) == wrapper_public_inputs_b[4],
-        "pair: deposits_b hash mismatch",
+        "wrapper_16: deposits_b hash mismatch",
     );
     assert(
         poseidon2_hash(withdrawals_b) == wrapper_public_inputs_b[5],
-        "pair: withdrawals_b hash mismatch",
+        "wrapper_16: withdrawals_b hash mismatch",
     );
 
     // 3. State-root chain: B's old root == A's new root.
     assert(
         wrapper_public_inputs_a[1] == wrapper_public_inputs_b[0],
-        "pair: state root chain broken",
+        "wrapper_16: state root chain broken",
     );
 
-    // 4. Tree-index chain: B's starting indices == A's starting indices + A's counts.
+    // 4. Tree-index chain.
     let mut null_count_a: Field = 0;
     for i in 0..SUB_BATCH_NULLIFIERS {
         if nullifiers_a[i] != 0 { null_count_a += 1; }
@@ -126,18 +132,18 @@ fn main(
     }
     assert(
         wrapper_public_inputs_b[6] == wrapper_public_inputs_a[6] + null_count_a,
-        "pair: nullifier tree index chain broken",
+        "wrapper_16: nullifier tree index chain broken",
     );
     assert(
         wrapper_public_inputs_b[7] == wrapper_public_inputs_a[7] + nh_count_a,
-        "pair: note hash tree index chain broken",
+        "wrapper_16: note hash tree index chain broken",
     );
 
     // 5. Build merged arrays and compute combined hashes.
-    let mut merged_nullifiers: [Field; MERGED_BATCH_NULLIFIERS] = [0; MERGED_BATCH_NULLIFIERS];
-    let mut merged_note_hashes: [Field; MERGED_BATCH_NOTE_HASHES] = [0; MERGED_BATCH_NOTE_HASHES];
-    let mut merged_deposits: [Field; MERGED_BATCH_SIZE] = [0; MERGED_BATCH_SIZE];
-    let mut merged_withdrawals: [Field; MERGED_BATCH_SIZE] = [0; MERGED_BATCH_SIZE];
+    let mut merged_nullifiers: [Field; BATCH_16_NULLIFIERS] = [0; BATCH_16_NULLIFIERS];
+    let mut merged_note_hashes: [Field; BATCH_16_NOTE_HASHES] = [0; BATCH_16_NOTE_HASHES];
+    let mut merged_deposits: [Field; BATCH_16_SIZE] = [0; BATCH_16_SIZE];
+    let mut merged_withdrawals: [Field; BATCH_16_SIZE] = [0; BATCH_16_SIZE];
 
     for i in 0..SUB_BATCH_NULLIFIERS {
         merged_nullifiers[i] = nullifiers_a[i];
@@ -155,30 +161,37 @@ fn main(
     }
 
     // 6. Expose merged public outputs.
-    assert(old_state_root == wrapper_public_inputs_a[0], "pair: old state root mismatch");
-    assert(new_state_root == wrapper_public_inputs_b[1], "pair: new state root mismatch");
+    assert(old_state_root == wrapper_public_inputs_a[0], "wrapper_16: old state root mismatch");
+    assert(new_state_root == wrapper_public_inputs_b[1], "wrapper_16: new state root mismatch");
     assert(
         merged_nullifiers_hash == poseidon2_hash(merged_nullifiers),
-        "pair: merged nullifiers hash mismatch",
+        "wrapper_16: merged nullifiers hash mismatch",
     );
     assert(
         merged_note_hashes_hash == poseidon2_hash(merged_note_hashes),
-        "pair: merged note hashes hash mismatch",
+        "wrapper_16: merged note hashes hash mismatch",
     );
     assert(
         merged_deposit_nullifiers_hash == poseidon2_hash(merged_deposits),
-        "pair: merged deposit nullifiers hash mismatch",
+        "wrapper_16: merged deposit nullifiers hash mismatch",
     );
     assert(
         merged_withdrawal_claims_hash == poseidon2_hash(merged_withdrawals),
-        "pair: merged withdrawal claims hash mismatch",
+        "wrapper_16: merged withdrawal claims hash mismatch",
     );
     assert(
         nullifier_tree_start_index == wrapper_public_inputs_a[6],
-        "pair: nullifier tree start index mismatch",
+        "wrapper_16: nullifier tree start index mismatch",
     );
     assert(
         note_hash_tree_start_index == wrapper_public_inputs_a[7],
-        "pair: note hash tree start index mismatch",
+        "wrapper_16: note hash tree start index mismatch",
+    );
+
+    // 7. Expose the wrapper VK hash the two inner proofs were verified under.
+    //    submit_batch_16 asserts this == committed tube_vk_hash.
+    assert(
+        out_wrapper_vk_hash == wrapper_vk_hash,
+        "wrapper_16: out wrapper vk hash mismatch",
     );
 }

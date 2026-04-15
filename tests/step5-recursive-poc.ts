@@ -29,7 +29,7 @@ import { TokenContract } from "@aztec/noir-contracts.js/Token";
 import { readFileSync } from "fs";
 import { resolve } from "path";
 
-import { TestL3State } from "./harness/state.js";
+import { TestL3State, RECURSIVE_BATCH_SIZING } from "./harness/state.js";
 import {
   buildBatchProofRecursive,
   computeWrapperVkHash,
@@ -39,6 +39,7 @@ import {
   type TxProofResult,
   type BatchArtifact,
 } from "./harness/prover-recursive.js";
+import { assertRecursiveSubmitShape, BATCH_OUTPUT_FIELDS } from "./harness/recursive-shapes.js";
 
 // -------------------------------------------------------------------------
 // Config
@@ -119,7 +120,10 @@ async function main() {
   const { contract: l3 } = await Contract.deploy(
     wallet,
     l3Artifact,
-    [initialStateRoot.toBigInt(), wrapperVkHash.toBigInt(), 0n],
+    // step5 only exercises submit_batch (wrapper path); merged_vk_hash,
+    // pp_vk_hash, and quad_vk_hash are set to 0 -- their entry points
+    // (submit_batch_16 / submit_batch_64) are not called in this test.
+    [initialStateRoot.toBigInt(), wrapperVkHash.toBigInt(), 0n, 0n, 0n],
     "constructor",
   ).send({ from: admin });
   console.log(`  L3:    ${l3.address}`);
@@ -151,6 +155,26 @@ async function main() {
 
     const tubeVkFields = vkBytesToFields(artifact.tubeVk);
     const tubeProofFields = proofBytesToFields(artifact.tubeProof);
+
+    // Assert client-to-contract boundary shapes. Historical bug (SDK silent
+    // truncation from 519->500) manifested exactly at this seam; any shape
+    // drift here should fail loudly rather than be silently fixed up.
+    // wrapper (submit_batch) public-inputs shape is the 8-field BatchOutput
+    // only; no inner VK-chain fields at the lowest level.
+    assertRecursiveSubmitShape(
+      `submit_batch[${label}]`,
+      tubeProofFields,
+      tubeVkFields,
+      artifact.tubePublicInputs,
+      artifact.settleInputs.nullifiers,
+      artifact.settleInputs.noteHashes,
+      artifact.settleInputs.depositNullifiers,
+      artifact.settleInputs.withdrawalClaims,
+      BATCH_OUTPUT_FIELDS,
+      RECURSIVE_BATCH_SIZING.batchNullifiersCount,
+      RECURSIVE_BATCH_SIZING.batchNoteHashesCount,
+      RECURSIVE_BATCH_SIZING.maxBatchSize,
+    );
 
     await l3.methods
       .submit_batch(

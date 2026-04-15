@@ -10,7 +10,11 @@
     "step1": "npx tsx step1-real-deposit.ts",
     "step2": "npx tsx step2-submit-batch-probe.ts",
     "step3": "npx tsx step3-submit-batch-valid.ts",
-    "e2e": "npx tsx step4-full-lifecycle.ts"
+    "e2e": "npx tsx step4-full-lifecycle.ts",
+    "verify:recursive": "npx tsx verify-with-bb-cli.ts",
+    "verify:recursive:64": "INCLUDE_64=1 npx tsx verify-with-bb-cli.ts",
+    "verify:recursive:negative": "npx tsx verify-negative-tests.ts",
+    "probe:chain:64": "npx tsx probe-chain-binding-64.ts"
   },
   "dependencies": {
     "@aztec/accounts": "4.2.0-nightly.20260408",

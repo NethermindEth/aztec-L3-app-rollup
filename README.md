@@ -27,28 +27,28 @@ All proofs are generated at `noir-recursive` target, producing 500-field `UltraH
 
 ## Batching: 16 slots per L2 tx
 
-Two sub-batches of 8 can be aggregated into a single L2 transaction via `pair_wrapper`:
+Two sub-batches of 8 can be aggregated into a single L2 transaction via `wrapper_16`:
 
 ```
 sub-batch 1 (8 slots) --> batch_app_standalone --> wrapper [noir-recursive] --+
                                                                               |
-                                                                              +--> pair_wrapper --> 1 merged proof [noir-recursive]
+                                                                              +--> wrapper_16 --> 1 merged proof [noir-recursive]
                                                                               |                           |
 sub-batch 2 (8 slots) --> batch_app_standalone --> wrapper [noir-recursive] --+                           v
-                                                                                          submit_merged_batch (L3RecursiveSettlement)
+                                                                                          submit_batch_16 (L3RecursiveSettlement)
                                                                                                           |
-                                                                                          settle_batch_merged (batch=16)
+                                                                                          settle_batch_16 (batch=16)
                                                                                           One Aztec L2 tx, nonce += 1
 ```
 
 - **1 merged proof** on L2 (16,000 bytes, 500 fields)
 - **23,040 bytes DA** (43% less than posting 2 separate proofs)
-- **1 `settle_batch_merged` call** (nonce += 1)
+- **1 `settle_batch_16` call** (nonce += 1)
 
 End-to-end test:
 
 ```sh
-npx tsx tests/step9-recursive-merged-16slot.ts
+npx tsx tests/step9-recursive-16slot.ts
 ```
 
 See [`BATCHING_OF_BATCHES.md`](./BATCHING_OF_BATCHES.md) for architecture, reproduction steps, and measurements. See [`BATCHING_SCALING.md`](./BATCHING_SCALING.md) for extrapolation to 32 and 128 slots.
@@ -95,8 +95,8 @@ export PATH="$HOME/.aztec/current/bin:$HOME/.aztec/current/node_modules/.bin:$PA
 # and strips internal function-name prefixes:
 aztec compile --workspace --force
 
-# pair_wrapper and pair_tube are standalone bin crates (not contracts):
-cd circuits/pair_wrapper && nargo compile && cd ../..
+# wrapper_16 and pair_tube are standalone bin crates (not contracts):
+cd circuits/wrapper_16 && nargo compile && cd ../..
 cd circuits/pair_tube && nargo compile && cd ../..
 ```
 
@@ -105,7 +105,7 @@ Expected `target/` contents:
 | File | Pipeline |
 |---|---|
 | `l3_deposit.json`, `l3_payment.json`, `l3_withdraw.json`, `l3_padding.json` | Shared (per-tx) |
-| `l3_batch_app_standalone.json`, `l3_wrapper.json`, `l3_pair_wrapper.json` | Recursive (primary) |
+| `l3_batch_app_standalone.json`, `l3_wrapper.json`, `l3_wrapper_16.json` | Recursive (primary) |
 | `l3_batch_app.json`, `l3_init_kernel.json`, `l3_tail_kernel.json`, `l3_hiding_kernel.json`, `l3_tube.json` | IVC (benchmark only) |
 | `l3_pair_tube.json` | IVC + RollupHonk aggregation (benchmark only) |
 | `l3_recursive_settlement-L3RecursiveSettlement.json` | Recursive contract |
@@ -155,7 +155,7 @@ npx tsx step5-recursive-poc.ts
 
 ```sh
 cd tests
-npx tsx step9-recursive-merged-16slot.ts
+npx tsx step9-recursive-16slot.ts
 ```
 
 See [`BATCHING_OF_BATCHES.md`](./BATCHING_OF_BATCHES.md) for expected numbers and full cost comparison.
@@ -216,7 +216,7 @@ circuits/
   # Recursive pipeline (primary)
   batch_app_standalone/  Aggregates 8 txs, explicit pub outputs (no databus)
   wrapper/               Verifies batch_app_standalone UltraHonk proof
-  pair_wrapper/          Aggregates 2 wrapper proofs -> 1 merged proof
+  wrapper_16/          Aggregates 2 wrapper proofs -> 1 merged proof
 
   # IVC pipeline (benchmark only — proof format mismatch, see above)
   batch_app/             Aggregates 8 txs, IVC-threaded output (databus)
@@ -227,9 +227,9 @@ circuits/
   pair_tube/             Aggregates 2 RollupHonk tube proofs via verify_rolluphonk_proof
 
 contract_recursive/      L3RecursiveSettlement — primary contract
-                         Methods: submit_batch, submit_merged_batch, settle_batch_merged
+                         Methods: submit_batch, submit_batch_16, settle_batch_16
 contract_ivc/            L3IvcSettlement — benchmark only
-                         Methods: submit_batch, submit_two_batches, submit_merged_batch
+                         Methods: submit_batch, submit_two_batches, submit_batch_16
 
 tests/
   harness/
@@ -239,7 +239,7 @@ tests/
                                      buildPairWrapperProof)
     actions.ts                       High-level IVC test actions
   step5-recursive-poc.ts                Recursive e2e test (single-batch)
-  step9-recursive-merged-16slot.ts      Recursive merged-proof (16 slots)
+  step9-recursive-16slot.ts      Recursive merged-proof (16 slots)
   step4-full-lifecycle.ts               IVC e2e (benchmark only)
   step8-ivc-meta-16slot.ts              IVC meta-batch (benchmark only)
   step10-ivc-merged-16slot.ts           IVC + pair_tube (benchmark only)
@@ -249,7 +249,12 @@ tests/
 
 ## Known limitations
 
-- **Sandbox does not verify proofs.** `verify_honk_proof` is a no-op in `PXE_PROVER=none` mode. E2e tests validate contract logic, not proof soundness. See [`SILENT_FAILURE_REVIEW.md`](./SILENT_FAILURE_REVIEW.md).
+- **Proof gate is a no-op locally.** `verify_honk_proof` is not enforced in either `PXE_PROVER=none` sandbox runs or TestEnvironment (`aztec test`) — both use the same ACIR simulator. This applies to every `submit_*` entry point: `submit_batch`, `submit_batch_16`, `submit_batch_64`. Sandbox e2e tests (step5/step9/step11) validate prover correctness + contract state machine + ABI plumbing, but **not** on-chain gate soundness. Local soundness for each aggregation level is covered via external `bb verify`:
+    - `npm run verify:recursive` — wrapper (8-slot) + wrapper_16 (16-slot) artifacts + positive bb verify.
+    - `INCLUDE_64=1 npm run verify:recursive:64` — adds wrapper_32 (32-slot) + wrapper_64 (64-slot).
+    - `npm run verify:recursive:negative` — validates artifact freshness against current circuit VKs, then runs the 7-case tamper matrix (baseline + 6 rejections) for **each** level present in the manifest (wrapper, wrapper_16, and — when the quad scope is present — wrapper_32 and wrapper_64).
+
+  **Inner-VK chain binding** is enforced at every aggregator level: `wrapper_16` / `wrapper_32` / `wrapper_64` each publish the VK hash(es) of the proofs they recursively verified, and `submit_batch_16` / `submit_batch_64` assert those against immutable contract-storage commitments. This closes the inner-VK substitution attack class for both the 16-slot and 64-slot paths. See [`SILENT_FAILURE_REVIEW.md`](./SILENT_FAILURE_REVIEW.md) for the hardening note.
 - **IVC proof format mismatch.** Tube proofs are 519-field `noir-rollup`; contracts expect 500-field `UltraHonkZKProof`. The recursive pipeline does not have this issue.
 - **Batch size is 8.** IVC is capped by Chonk ECCVM. Recursive has no protocol cap but is kept at 8 for memory budget reasons.
 - **1 real tx per sub-batch in the harness.** The circuits support multi-tx (tested in Noir unit tests); the prover harness needs a refactor to chain intermediate state roots.

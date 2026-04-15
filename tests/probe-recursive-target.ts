@@ -1,11 +1,11 @@
 /**
  * probe-recursive-target.ts
  *
- * Quick diagnostic: can pair_wrapper be proved at noir-recursive target
+ * Quick diagnostic: can wrapper_16 be proved at noir-recursive target
  * (producing 500-field proofs matching the contract ABI)?
  *
  * The recursive pipeline has no Chonk/IPA anywhere — all inner proofs are
- * noir-recursive UltraHonk. If pair_wrapper can also be proved at
+ * noir-recursive UltraHonk. If wrapper_16 can also be proved at
  * noir-recursive, Design B can close the 519/500 gap without any
  * Aztec platform changes.
  */
@@ -27,7 +27,7 @@ import { TestL3State } from "./harness/state.js";
 import type { TxProofResult } from "./harness/prover.js";
 import {
   buildBatchProofRecursive,
-  buildPairWrapperProof,
+  buildWrapper16Proof,
   proveDeposit,
 } from "./harness/prover-recursive.js";
 
@@ -72,7 +72,7 @@ async function cloneL3StateWithDeposit(
 }
 
 async function main() {
-  console.log("=== Probe: Can pair_wrapper produce noir-recursive (500-field) proofs? ===\n");
+  console.log("=== Probe: Can wrapper_16 produce noir-recursive (500-field) proofs? ===\n");
 
   const api = await Barretenberg.new({ threads: 4 });
 
@@ -96,28 +96,28 @@ async function main() {
   const l3StateB = await cloneL3StateWithDeposit(l3State, depProofA);
   const depProofB = await proveDeposit(api, l3StateB, amount, tokenId, alicePk.x, alicePk.y, saltB);
 
-  console.log("  Building sub-batch A (wrapper at noir-recursive)...");
-  const artifactA = await buildBatchProofRecursive(api, l3State, [depProofA], { wrapperTarget: "noir-recursive" });
+  console.log("  Building sub-batch A...");
+  const artifactA = await buildBatchProofRecursive(api, l3State, [depProofA]);
   console.log(`    wrapper proof A: ${artifactA.tubeProof.length} bytes (${artifactA.tubeProof.length / 32} fields)`);
 
-  console.log("  Building sub-batch B (wrapper at noir-recursive)...");
-  const artifactB = await buildBatchProofRecursive(api, l3StateB, [depProofB], { wrapperTarget: "noir-recursive" });
+  console.log("  Building sub-batch B...");
+  const artifactB = await buildBatchProofRecursive(api, l3StateB, [depProofB]);
   console.log(`    wrapper proof B: ${artifactB.tubeProof.length} bytes (${artifactB.tubeProof.length / 32} fields)\n`);
 
-  // Step 2: Build pair_wrapper proof at noir-recursive (current behavior).
-  console.log("Building pair_wrapper proof at noir-recursive (current default)...");
-  const pairArtifact = await buildPairWrapperProof(api, artifactA, artifactB);
-  const pairFields = pairArtifact.pairProof.length / 32;
-  console.log(`  noir-recursive: ${pairArtifact.pairProof.length} bytes (${pairFields} fields)\n`);
+  // Step 2: Build wrapper_16 proof at noir-recursive (current behavior).
+  console.log("Building wrapper_16 proof at noir-recursive (current default)...");
+  const pairArtifact = await buildWrapper16Proof(api, artifactA, artifactB);
+  const pairFields = pairArtifact.w16Proof.length / 32;
+  console.log(`  noir-recursive: ${pairArtifact.w16Proof.length} bytes (${pairFields} fields)\n`);
 
   // Step 3: Verify it's 500 fields (not 519).
-  console.log("Building pair_wrapper proof at noir-recursive (the test)...");
+  console.log("Building wrapper_16 proof at noir-recursive (the test)...");
   try {
     const { Noir } = await import("@aztec/noir-noir_js");
-    const pairCircuit = JSON.parse(readFileSync(resolve(TARGET_DIR, "l3_pair_wrapper.json"), "utf-8"));
+    const pairCircuit = JSON.parse(readFileSync(resolve(TARGET_DIR, "l3_wrapper_16.json"), "utf-8"));
     const pairBackend = new UltraHonkBackend(pairCircuit.bytecode, api);
 
-    // Re-execute to get witness (buildPairWrapperProof doesn't expose it).
+    // Re-execute to get witness (buildWrapper16Proof doesn't expose it).
     const p2h = async (inputs: Fr[]) => poseidon2Hash(inputs);
     const f2s = (f: Fr) => f.toString();
 
@@ -177,7 +177,7 @@ async function main() {
     console.log(`  verified: ${valid}`);
 
     if (recursiveFields === 500) {
-      console.log("\n  *** SUCCESS: pair_wrapper at noir-recursive produces 500-field proofs ***");
+      console.log("\n  *** SUCCESS: wrapper_16 at noir-recursive produces 500-field proofs ***");
       console.log("  Design B can close the 519/500 gap by switching the final prove target.");
 
       // Step 4: Try submitting to a real contract.
@@ -215,7 +215,7 @@ async function main() {
       const { contract: token } = await TokenContract.deploy(wallet, admin, "T", "T", 18).send({ from: admin });
       const { contract: l3 } = await Contract.deploy(
         wallet, l3Artifact,
-        [contractState.stateRoot.toBigInt(), wrapperVkForContract.toBigInt(), pairVkForContract.toBigInt()],
+        [contractState.stateRoot.toBigInt(), wrapperVkForContract.toBigInt(), pairVkForContract.toBigInt(), 0n, 0n],
         "constructor",
       ).send({ from: admin });
       await token.methods.mint_to_public(l3.address, 1_000_000n).send({ from: admin });
@@ -241,7 +241,7 @@ async function main() {
       console.log(`  Submitting ${mergedProofFields.length}-field proof to contract (ABI expects 500)...`);
 
       try {
-        await l3.methods.submit_merged_batch(
+        await l3.methods.submit_batch_16(
           mergedVkFields,
           mergedProofFields,
           proofData.publicInputs,
@@ -266,7 +266,7 @@ async function main() {
     }
   } catch (e: any) {
     console.log(`  FAILED: ${e.message ?? e}`);
-    console.log("  pair_wrapper cannot be proved at noir-recursive target.\n");
+    console.log("  wrapper_16 cannot be proved at noir-recursive target.\n");
   }
 
   await api.destroy();

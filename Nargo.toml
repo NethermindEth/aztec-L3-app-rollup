@@ -17,9 +17,13 @@ members = [
     # Recursive pipeline (batch size 8 per sub-batch): batch_app_standalone -> wrapper.
     "circuits/batch_app_standalone",
     "circuits/wrapper",
-    # Recursive aggregation: pair_wrapper merges 2 wrapper proofs into 1
-    # UltraHonk proof with batch=16 merged public outputs.
-    "circuits/pair_wrapper",
+    # Recursive aggregation, named by slot capacity:
+    #   wrapper_16: merges 2 wrapper proofs       -> 16 slots (submit_batch_16)
+    #   wrapper_32: merges 2 wrapper_16 proofs    -> 32 slots (intermediate; not a submit target)
+    #   wrapper_64: merges 2 wrapper_32 proofs    -> 64 slots (submit_batch_64)
+    "circuits/wrapper_16",
+    "circuits/wrapper_32",
+    "circuits/wrapper_64",
     # Path C: pair_tube merges 2 IVC tube proofs (RollupHonk, 519 fields)
     # into 1 merged proof via verify_rolluphonk_proof.
     "circuits/pair_tube",

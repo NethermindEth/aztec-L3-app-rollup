@@ -1,5 +1,5 @@
 [package]
-name = "l3_pair_wrapper"
+name = "l3_wrapper_32"
 type = "bin"
 authors = []
 compiler_version = ">=0.25.0"

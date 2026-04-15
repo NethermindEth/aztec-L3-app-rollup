@@ -15,6 +15,16 @@ pub global MAX_BATCH_SIZE: u32 = 8;
 pub global BATCH_NULLIFIERS_COUNT: u32 = 16;
 pub global BATCH_NOTE_HASHES_COUNT: u32 = 16;
 
+// 16-slot aggregated batch (wrapper_16 path).
+pub global BATCH_16_SIZE: u32 = 16;
+pub global BATCH_16_NULLIFIERS_COUNT: u32 = 32;
+pub global BATCH_16_NOTE_HASHES_COUNT: u32 = 32;
+
+// 64-slot aggregated batch (wrapper_64 path).
+pub global BATCH_64_SIZE: u32 = 64;
+pub global BATCH_64_NULLIFIERS_COUNT: u32 = 128;
+pub global BATCH_64_NOTE_HASHES_COUNT: u32 = 128;
+
 // -----------------------------------------------------------------------
 // TestL3 -- wraps contract interaction for clean multi-step tests.
 //
@@ -48,10 +58,12 @@ impl TestL3 {
         // Mint public supply.
         env.call_public(admin, Token::at(token).mint_to_public(admin, INITIAL_SUPPLY));
 
-        // Deploy L3RecursiveSettlement (zero genesis root, zero wrapper VK hash,
-        // zero merged VK hash -- none of the VK-checked entry points are
-        // exercised by these unit tests).
-        let l3_init = L3RecursiveSettlement::interface().constructor(0, 0, 0);
+        // Deploy L3RecursiveSettlement with all VK hashes zeroed: none of the
+        // VK-checked entry points (submit_batch / submit_batch_16 /
+        // submit_batch_64) are exercised in these state-machine tests.
+        // verify_honk_proof is a no-op in TXE ACIR simulation anyway, so
+        // private submit_* paths cannot be gate-tested locally.
+        let l3_init = L3RecursiveSettlement::interface().constructor(0, 0, 0, 0, 0);
         let l3 = env.deploy("L3RecursiveSettlement").with_public_initializer(admin, l3_init);
 
         // Fund L3 contract with tokens for withdrawal payouts.
@@ -105,6 +117,80 @@ impl TestL3 {
             self.l3,
             L3RecursiveSettlement::at(self.l3).settle_batch(
                 self.state_root,     // old_state_root
+                new_state_root,
+                deposit_nullifiers,
+                withdrawal_claims,
+                null_count,
+                nh_count,
+                nullifiers,
+                note_hashes,
+            ),
+        );
+
+        self.state_root = new_state_root;
+        self.null_idx += null_count;
+        self.nh_idx += nh_count;
+    }
+
+    // Settle a 16-slot aggregated batch (wrapper_16 path).
+    pub unconstrained fn settle_16(
+        &mut self,
+        nullifiers: [Field; BATCH_16_NULLIFIERS_COUNT],
+        note_hashes: [Field; BATCH_16_NOTE_HASHES_COUNT],
+        deposit_nullifiers: [Field; BATCH_16_SIZE],
+        withdrawal_claims: [Field; BATCH_16_SIZE],
+        new_state_root: Field,
+    ) {
+        let mut null_count: Field = 0;
+        for i in 0..BATCH_16_NULLIFIERS_COUNT {
+            if nullifiers[i] != 0 { null_count += 1; }
+        }
+        let mut nh_count: Field = 0;
+        for i in 0..BATCH_16_NOTE_HASHES_COUNT {
+            if note_hashes[i] != 0 { nh_count += 1; }
+        }
+
+        self.env.call_public(
+            self.l3,
+            L3RecursiveSettlement::at(self.l3).settle_batch_16(
+                self.state_root,
+                new_state_root,
+                deposit_nullifiers,
+                withdrawal_claims,
+                null_count,
+                nh_count,
+                nullifiers,
+                note_hashes,
+            ),
+        );
+
+        self.state_root = new_state_root;
+        self.null_idx += null_count;
+        self.nh_idx += nh_count;
+    }
+
+    // Settle a 64-slot aggregated batch (wrapper_64 path).
+    pub unconstrained fn settle_64(
+        &mut self,
+        nullifiers: [Field; BATCH_64_NULLIFIERS_COUNT],
+        note_hashes: [Field; BATCH_64_NOTE_HASHES_COUNT],
+        deposit_nullifiers: [Field; BATCH_64_SIZE],
+        withdrawal_claims: [Field; BATCH_64_SIZE],
+        new_state_root: Field,
+    ) {
+        let mut null_count: Field = 0;
+        for i in 0..BATCH_64_NULLIFIERS_COUNT {
+            if nullifiers[i] != 0 { null_count += 1; }
+        }
+        let mut nh_count: Field = 0;
+        for i in 0..BATCH_64_NOTE_HASHES_COUNT {
+            if note_hashes[i] != 0 { nh_count += 1; }
+        }
+
+        self.env.call_public(
+            self.l3,
+            L3RecursiveSettlement::at(self.l3).settle_batch_64(
+                self.state_root,
                 new_state_root,
                 deposit_nullifiers,
                 withdrawal_claims,
