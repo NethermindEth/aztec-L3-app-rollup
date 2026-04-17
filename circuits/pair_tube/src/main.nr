@@ -1,17 +1,29 @@
-// pair_tube -- recursive RollupHonk aggregator for 2 IVC tube proofs.
+// pair_tube -- recursive RollupHonk-root aggregator for 2 IVC tube proofs.
 //
-// Structurally identical to pair_wrapper, but uses verify_rolluphonk_proof
-// with RollupHonkProof (519 fields) instead of verify_honk_proof with
-// UltraHonkZKProof (500 fields). This allows verifying tube proofs generated
-// at noir-rollup target, which carry IPA accumulation material from the
-// Chonk compression step.
+// Consumes two 519-field RollupHonkProof tube proofs as inputs, but invokes
+// the ROOT_ROLLUP_HONK verifier (proof type 5) which finalizes the two
+// accumulated IPA claims natively in-circuit. With no IPA material leaking
+// into pair_tube's own public inputs, pair_tube can be proved at
+// `noir-recursive` target and emit a 500-field UltraHonkZK proof that
+// matches the contract ABI's `UltraHonkZKProof = [Field; 500]`.
+//
+// Proof type 5 = ROOT_ROLLUP_HONK in barretenberg's PROOF_TYPE enum
+// (recursion_constraint.hpp). The bb_proof_verification lib at
+// v4.2.0-nightly.20260408 exposes HONK/ROLLUP_HONK/HONK_ZK helpers but no
+// root-rollup helper, so we call std::verify_proof_with_type directly.
+// Barretenberg enforces that a circuit marked is_root_rollup accumulates
+// exactly two nested IPA claims -- pair_tube's two tube-proof verifications
+// satisfy that invariant by construction.
 //
 // Verifies two tube proofs, re-feeds both batches' settle-data arrays so
 // that their poseidon2 hashes can be cross-checked, chains the state roots and
 // tree indices, and exposes merged batch=16-equivalent public inputs.
 
 use l3_types::poseidon2_hash;
-use bb_proof_verification::{verify_rolluphonk_proof, RollupHonkVerificationKey, RollupHonkProof};
+use bb_proof_verification::{RollupHonkVerificationKey, RollupHonkProof};
+
+// ROOT_ROLLUP_HONK in PROOF_TYPE enum -- finalizes accumulated IPA claims.
+global PROOF_TYPE_ROOT_ROLLUP_HONK: u32 = 5;
 
 // These MUST match circuits/batch_app globals (batch=8):
 global SUB_BATCH_SIZE: u32 = 8;
@@ -69,9 +81,23 @@ fn main(
     nullifier_tree_start_index: pub Field,
     note_hash_tree_start_index: pub Field,
 ) {
-    // 1. Verify both tube proofs against the shared VK.
-    verify_rolluphonk_proof(tube_vk, tube_proof_a, tube_public_inputs_a, tube_vk_hash);
-    verify_rolluphonk_proof(tube_vk, tube_proof_b, tube_public_inputs_b, tube_vk_hash);
+    // 1. Verify both tube proofs under ROOT_ROLLUP_HONK against the shared VK.
+    //    Both IPA claims are finalized natively at the circuit boundary, so
+    //    pair_tube's own proof carries no IPA material.
+    std::verify_proof_with_type(
+        tube_vk,
+        tube_proof_a,
+        tube_public_inputs_a,
+        tube_vk_hash,
+        PROOF_TYPE_ROOT_ROLLUP_HONK,
+    );
+    std::verify_proof_with_type(
+        tube_vk,
+        tube_proof_b,
+        tube_public_inputs_b,
+        tube_vk_hash,
+        PROOF_TYPE_ROOT_ROLLUP_HONK,
+    );
 
     // 2. Re-fed arrays must match each tube's committed hashes.
     assert(

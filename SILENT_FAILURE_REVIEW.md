@@ -1,161 +1,74 @@
-# Silent Failure: Proof Verification in Aztec L3 Settlement Contracts
+# Proof Verification Gap
 
-> **Date**: 2026-04-14 (updated 2026-04-15)
-> **Aztec version**: `v4.2.0-nightly.20260408`
-> **Affects**: All proving paths — every `submit_*` method in both contracts. `L3RecursiveSettlement`: `submit_batch`, `submit_batch_16`, `submit_batch_64`. `L3IvcSettlement`: `submit_batch`, `submit_two_batches`, `submit_merged_batch` (original pre-rename names retained on IVC).
+> **Aztec version**: `v4.2.0-nightly.20260408`.
+> **Scope**: all `submit_*` entry points on `L3RecursiveSettlement` and `L3IvcSettlement`.
 
-> **Environment scope**: The proof-gate no-op applies to BOTH the sandbox (`PXE_PROVER=none`) AND the TestEnvironment (`aztec test` via TXE). TXE uses the same ACIR simulator as the sandbox's PXE; `verify_honk_proof` is stubbed in both. Noir `#[test]`s calling a private function via `env.call_private(...)` with a tampered proof blob will still accept it. Contract-gate soundness cannot be tested locally at any layer; the authoritative local soundness signal is external `bb verify` (see [tests/verify-with-bb-cli.ts](./tests/verify-with-bb-cli.ts) and [tests/verify-negative-tests.ts](./tests/verify-negative-tests.ts)).
-
-> **2026-04-15 hardening — inner-VK chain binding.** Previously, each aggregator circuit (`wrapper_16`, `wrapper_32`, `wrapper_64`) took the inner proof's VK as a private witness with no on-chain commitment. Only the outermost VK (checked at `submit_*`) was bound. A malicious prover could substitute a weaker inner circuit's VK and the contract would accept the resulting proof. This class is now closed: every aggregator publishes the VK hash(es) of the proofs it verified as additional public inputs, and `submit_batch_16` / `submit_batch_64` assert every level of the chain against immutable contract-storage slots (`tube_vk_hash` → `vk_hash_16` → `vk_hash_32` → `vk_hash_64`). This is a hardening, not a design change — the sandbox / TXE no-op remains as described above; what hardens is the behavior of a correctly-enforcing proof gate (Aztec platform change, or devnet) against inner-VK substitution.
+Two independent issues affect on-chain proof verification on this Aztec version. One is a sandbox-layer limitation we cannot fix from this repo; the other was a proof-format mismatch that we closed at the circuit level on 2026-04-17.
 
 ---
 
-## The problem
+## Problem 1: sandbox / TXE do not enforce `verify_honk_proof`
 
-User-deployed Aztec contracts cannot soundly verify ZK proofs produced by any of the proving pipelines in this repo. The sandbox accepts all proofs — including completely fabricated ones — because `verify_honk_proof` is a **no-op** during ACIR simulation (`PXE_PROVER=none`). Additionally, a proof size mismatch between what the prover generates (519 fields) and what the contract ABI declares (500 fields) causes silent truncation by the SDK, discarding IPA commitment material.
+`PXE_PROVER=none` (the sandbox default) and the `aztec test` TestEnvironment share the same ACIR simulator. `verify_honk_proof` compiles to a `RecursiveAggregation` opcode that simulator treats as a no-op. Plain Noir `assert`s *are* enforced.
 
-This is not a bug in our code. It is a **missing platform capability**: Aztec does not currently provide a way for user-deployed contracts to verify `noir-rollup` proofs produced by `UltraHonkBackend`.
-
----
-
-## Empirical evidence
-
-### Test: `step2-submit-batch-probe.ts` (zero-proof and shape-boundary probes)
+Empirically (via `tests/step2-submit-batch-probe.ts`):
 
 ```
-Probe 1: submit_batch with all-zero proof         → ACCEPTED
-Probe 2: submit_batch with one flipped proof byte  → ACCEPTED
-Probe 3: submit_batch with wrong tube_vk_hash      → REJECTED
-         "Assertion failed: tube_vk_hash does not match contract's committed hash"
-
-Probe 4: Shape-boundary test (proof array lengths)
-  proof[499]: REJECTED  ("Undefined argument tube_proof[499] of type field")
-  proof[500]: ACCEPTED
-  proof[501]: ACCEPTED
-  proof[519]: ACCEPTED
+submit_batch with all-zero proof          -> ACCEPTED
+submit_batch with one flipped proof byte  -> ACCEPTED
+submit_batch with wrong tube_vk_hash      -> REJECTED (Noir assert, not verify_honk_proof)
+proof[519] via the SDK                    -> ACCEPTED (silently truncated to 500)
 ```
 
-### What this tells us
+Soundness of a prove/verify pair is checked **out of band** via external `bb verify`, not via the sandbox. See:
+- `tests/verify-with-bb-cli.ts` — positive verification of every aggregator level.
+- `tests/verify-negative-tests.ts` — 7-case tamper matrix per level (proof / public inputs / VK × {swap, bit-flip}).
 
-1. **`verify_honk_proof` is not enforced.** An all-zero proof is accepted (Probe 1). A corrupted proof is accepted (Probe 2). The `RecursiveAggregation` opcode that `verify_honk_proof` compiles to is a no-op in the sandbox's ACIR simulation.
+This is a platform limitation, not a repo bug. It will only close when Aztec enables real kernel proving locally.
 
-2. **Noir `assert` statements ARE enforced.** The `tube_vk_hash` mismatch is rejected (Probe 3) because it's a plain field comparison in Noir, not a proof verification opcode.
+## Problem 2: proof format mismatch (closed 2026-04-17)
 
-3. **The SDK silently truncates oversized proof arrays.** Arrays shorter than 500 are rejected at the SDK layer (`proof[499]`), but arrays of 501 or 519 are silently truncated to 500 (`proof[501]`, `proof[519]` both accepted). No error, no warning.
+Previously, both IVC paths (Design A raw tube, Path C with `pair_tube`) submitted **519-field `RollupHonk`** proofs to contracts whose ABI declared a **500-field `UltraHonkZKProof`**. The SDK silently truncated the 19 excess fields (IPA claim + IPA proof), discarding the data that would have carried soundness.
 
-4. **All final contract-submitted proofs in the affected e2e paths are 519 fields.** Every proof generated with `verifierTarget: "noir-rollup"` is 16,608 bytes = 519 fields (449 base + 6 IPA claim + 64 IPA proof). Inner recursive proofs used inside standalone circuits remain 500-field `UltraHonkZKProof`s, but the proofs that actually cross the client-to-contract boundary in these paths are 519-field RollupHonk proofs. The contract ABI declares `UltraHonkZKProof = [Field; 500]`. The SDK drops the last 19 fields on every submission.
+**Fix**: `pair_tube` now verifies its two input tube proofs under **`PROOF_TYPE_ROOT_ROLLUP_HONK`** (enum value 5 in barretenberg's `recursion_constraint.hpp`). That variant finalizes the accumulated IPA claims **natively in-circuit**, so `pair_tube`'s own proof carries no IPA material and is emitted at `noir-recursive` target as a clean 500-field `UltraHonkZKProof`. The barretenberg invariant `is_root_rollup => nested_ipa_claims == 2` matches `pair_tube`'s 2-tube topology by construction.
 
-### External confirmation
+The proof-type constant isn't exposed as a helper in `bb_proof_verification` at this Aztec tag, so `pair_tube` calls `std::verify_proof_with_type` directly.
 
-The [ElusAegis/rollup-on-aztec](https://github.com/ElusAegis/rollup-on-aztec/tree/ag/feat/benchmark-ivc-vs-naive) repo independently hit this issue and explicitly skips on-chain verification for IVC proofs:
+**Empirical confirmation** (step10, 2026-04-17):
 
-```typescript
-if (mode === 'ivc') {
-    console.log('  SKIPPED: IVC tube proof uses noir-rollup target (519 fields)');
-    console.log('  verify_rolluphonk_proof is not supported in Aztec private');
-    console.log('  functions (MegaBuilder limitation).');
-    return;
-}
+- `pair_tube` proof: **500 fields / 16,000 bytes** (log: `Generated proof for circuit with 8 public inputs and 500 fields`).
+- In-circuit verify: `pair_tube verified: true`.
+- `submit_merged_batch`: nonce advanced to 1, root updated. No SDK truncation.
+
+Design A (raw tube submission in `contract_ivc.submit_batch`) is not affected by this fix and is still format-broken. Closing it would require applying the same `ROOT_ROLLUP_HONK` wrapping to its submission path.
+
+## Inner-VK chain binding (2026-04-15 hardening)
+
+Each aggregator (`wrapper_16/32/64`) now publishes the VK hash(es) of the proofs it recursively verified as extra public inputs. `submit_batch_16` / `submit_batch_64` assert the full chain against immutable contract-storage slots:
+
+```
+tube_vk_hash -> vk_hash_16 -> vk_hash_32 -> vk_hash_64
 ```
 
----
+This closes the inner-VK substitution class **conditional on** the proof gate being enforced. Under the sandbox/TXE no-op (Problem 1), the chain-binding asserts still fire (they are plain Noir asserts), which is why `probe-chain-binding-64.ts` can exercise them locally.
 
-## Two distinct problems
+## Current path status
 
-### Problem 1: Sandbox does not verify proofs
-
-The sandbox's default mode (`PXE_PROVER=none`) treats `verify_honk_proof` as a no-op during ACIR simulation. This means **no e2e test on the sandbox validates proof soundness**. The tests validate contract logic (state chaining, deposit consumption, withdrawal registration, nonce advancement) but not the ZK proof itself.
-
-This is documented Aztec behavior, not a bug. But it means the sandbox cannot be used to validate that proof verification works.
-
-### Problem 2: No supported path from prover output to contract verification
-
-Every proof generated by `UltraHonkBackend` with `verifierTarget: "noir-rollup"` is a 519-field RollupHonk proof. The contract's `verify_honk_proof` expects a 500-field `UltraHonkZKProof`. These are structurally different proof formats:
-
-| Format | Fields | Proof type | Produced by | Verified by |
+| Path | Client-side proving | On-wire format | Contract verification | Status |
 |---|---|---|---|---|
-| UltraHonkZK | 500 | `PROOF_TYPE_HONK_ZK` | `verifierTarget: "noir-recursive"` | `verify_honk_proof` |
-| RollupHonk | 519 | `PROOF_TYPE_ROLLUP_HONK` | `verifierTarget: "noir-rollup"` | `verify_rolluphonk_proof` |
+| **Path B — Recursive** (`submit_batch_16/64`) | Sound | 500-field `noir-recursive` UltraHonkZK | No-op locally (Problem 1) | Format-ready |
+| **Path C — IVC + `pair_tube`** (`submit_merged_batch`) | Sound | 500-field `noir-recursive` UltraHonkZK | No-op locally (Problem 1) | Format-ready (2026-04-17) |
+| **Design A — IVC raw tube** (`contract_ivc.submit_batch`) | Sound | 519-field, SDK-truncated | No-op locally (Problem 1) | Format-broken |
 
-There are two natural ways to close the contract-boundary gap, both currently blocked:
-
-**Use `noir-recursive` to produce 500-field proofs matching `verify_honk_proof`:**
-- This already works for inner recursive proofs (`batch_app_standalone`, `wrapper`, and the proofs consumed by `wrapper_16`).
-- Blocked for the final IVC/tube-style proofs that must be submitted to contracts: the tube circuit's Chonk verification produces IPA material incompatible with `noir-recursive` proving. Error: `"IPA proofs present when not expected"`.
-
-**Use `verify_rolluphonk_proof` in the contract to accept 519-field proofs:**
-- Blocked: `verify_rolluphonk_proof` uses `PROOF_TYPE_ROLLUP_HONK` via `std::verify_proof_with_type`. The Aztec private kernel compiles contract functions with MegaBuilder, which does not support this proof type.
-
----
-
-## What works today
-
-The client-side proving and recursive aggregation is fully sound. Every in-circuit verification uses matching proof types:
-
-| Circuit | Verifies | Proof format | Match? |
-|---|---|---|---|
-| `batch_app` / `batch_app_standalone` | per-tx proofs (`noir-recursive`, 500 fields) | `verify_honk_proof` (500) | **YES** |
-| `wrapper` | batch_app_standalone proof (`noir-recursive`, 500 fields) | `verify_honk_proof` (500) | **YES** |
-| `wrapper_16` | wrapper proofs (`noir-recursive`, 500 fields) | `verify_honk_proof` (500) | **YES** |
-| `pair_tube` | tube proofs (`noir-rollup`, 519 fields) | `verify_rolluphonk_proof` (519) | **YES** |
-
-These circuits are standalone Noir binaries proved with `UltraHonkBackend`, not inside Aztec contracts. They are not subject to the MegaBuilder limitation.
-
-The contract logic (state chaining, deposit/withdrawal tracking, VK hash binding, tree index advancement) is also correct — validated by Noir unit tests and e2e tests.
-
-**The gap is exclusively at the boundary where a proof crosses from the client-side prover into an Aztec contract's private function.**
-
----
-
-## What Aztec needs to provide
-
-For user-deployed L3 rollup contracts to soundly verify proofs, Aztec needs at least one of:
-
-1. **`PROOF_TYPE_ROLLUP_HONK` support in MegaBuilder** — so contracts can call `verify_rolluphonk_proof` with the 519-field proofs that `UltraHonkBackend` actually produces at `noir-rollup` target.
-
-2. **IPA-free `noir-recursive` proving for circuits containing Chonk verification** — so the IVC tube circuit can produce 500-field proofs compatible with the existing `verify_honk_proof` in contracts.
-
-3. **A documented, supported path for user contracts to verify proofs produced by `UltraHonkBackend`** — the current situation where `noir-rollup` produces 519 fields but contracts can only accept 500 is an API gap that has no workaround.
-
-Without one of these, IVC-based paths (Designs A and C) have no workaround for the 519/500 mismatch.
-
-**Note**: Design B (recursive pipeline) does NOT require any of the above. It stays entirely in UltraHonk land with no IPA material, so its final proof can be generated at `noir-recursive` target producing 500-field proofs that match the contract's `UltraHonkZKProof` ABI. This has been implemented and verified — see step9.
-
----
-
-## Affected paths in this repo
-
-| Path | Client-side proving | Proof format | Contract verification | Overall |
-|---|---|---|---|---|
-| **Design A** (IVC meta-batch) | Sound | 519 fields (truncated to 500) | Not enforced | **Blocked by platform** |
-| **Design B** (Recursive merged) | Sound | **500 fields (correct)** | Not enforced (sandbox limitation) | **Format-ready** |
-| **Path C** (IVC + pair_tube) | Sound | 519 fields (truncated to 500) | Not enforced | **Blocked by platform** |
-
-Design B is the only path with correct proof format alignment. Its proofs are 500-field `noir-recursive` UltraHonkZK, matching the contract's ABI exactly. When Aztec enables real proof verification in the private kernel, Design B should work without changes. Designs A and C require Aztec platform changes (items 1 or 2 above).
-
----
-
-## Test artifacts
-
-| Test | What it validates |
-|---|---|
-| `step2-submit-batch-probe.ts` | Probes 1-3: verify_honk_proof is a no-op; Noir asserts work. Probe 4: SDK truncates oversized arrays. |
-| `step4-full-lifecycle.ts` | Steps 7b-7c: tail-only corruption and 519-vs-500 equivalence (confirms truncation with real proofs). |
-| `contract_ivc/src/test/*.nr` | 5/5 Noir unit tests: contract logic is correct (state chaining, deposits, withdrawals, claims). |
-| `contract_recursive/src/test/*.nr` | 15/15 Noir unit tests: 5 lifecycle + 5 `settle_batch_16` state-machine tests + 5 `settle_batch_64` state-machine tests. |
-| `step8-ivc-meta-16slot.ts` | Design A e2e: IVC pipeline + contract settlement (proof not verified by sandbox). |
-| `step9-recursive-16slot.ts` | Design B e2e: recursive pipeline + wrapper_16 + contract settlement. |
-| `step10-ivc-merged-16slot.ts` | Path C e2e: IVC + pair_tube RollupHonk aggregation + contract settlement. |
-
----
+When Aztec enables real proof enforcement in the private kernel, Path B and Path C will both verify without further changes.
 
 ## Files involved
 
 | File | Role |
 |---|---|
-| `contract_ivc/src/main.nr` | Uses `verify_honk_proof` / `UltraHonkZKProof` (500 fields) — not enforced on sandbox |
-| `contract_recursive/src/main.nr` | Same |
-| `circuits/pair_tube/src/main.nr` | Uses `verify_rolluphonk_proof` / `RollupHonkProof` (519 fields) — standalone, sound |
-| `circuits/wrapper_16/src/main.nr` | Uses `verify_honk_proof` / `UltraHonkZKProof` (500 fields) — standalone, sound |
-| `tests/step2-submit-batch-probe.ts` | Diagnostic probes proving verify_honk_proof is a no-op and SDK truncates |
-| `bb_proof_verification/src/lib.nr` | Defines proof types: `UltraHonkZKProof = [Field; 500]`, `RollupHonkProof = [Field; 519]` |
+| `circuits/pair_tube/src/main.nr` | Uses `std::verify_proof_with_type(.., PROOF_TYPE_ROOT_ROLLUP_HONK=5)` to finalize IPA in-circuit; emits 500-field output |
+| `circuits/wrapper_16/{32,64}/src/main.nr` | Recursive aggregators; publish inner VK hash(es) for chain binding |
+| `contract_recursive/src/main.nr` | Uses `verify_honk_proof` with 500-field `UltraHonkZKProof`; chain-binding asserts |
+| `contract_ivc/src/main.nr` | Same ABI; `submit_merged_batch` consumes Path C's 500-field output |
+| `tests/step2-submit-batch-probe.ts` | Probes that confirm Problem 1 |
+| `tests/verify-{with-bb-cli,negative-tests}.ts` | External bb-verify soundness signal |

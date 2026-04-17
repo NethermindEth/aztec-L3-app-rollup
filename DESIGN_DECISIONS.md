@@ -1,129 +1,78 @@
 # Design Decisions
 
-## 1. Minimal DA in `settle_batch` by Delegating Verification to the Kernel Proof
+## 1. Minimal DA in `settle_batch` — delegate verification to the kernel proof
 
 ### Decision
 
-The `settle_batch` public function carries only the data it needs to mutate public state. All proof verification, hash consistency checks, and index validation are performed in the private `submit_batch` function and are not repeated in public.
+`settle_batch` (and `settle_batch_{16,64,merged}`) carries only the data needed to mutate public state. All proof verification, hash-consistency checks, and VK-identity checks happen in the private `submit_*` function and are not repeated in public.
 
-Concretely, `settle_batch` accepts:
+Public args:
 
-- `old_state_root` — to enforce sequential batch ordering
-- `new_state_root` — to advance the on-chain state
-- `deposit_nullifiers` — to consume pending deposits (public state mutation)
-- `withdrawal_claims` — to register pending withdrawals (public state mutation)
-- `null_count`, `nh_count` — to advance tree insertion indices
-- `nullifiers`, `note_hashes` — carried as args purely for DA (no processing in the function body)
+- `old_state_root`, `new_state_root` — advance the on-chain state
+- `deposit_nullifiers` — consume pending deposits
+- `withdrawal_claims` — register pending withdrawals
+- `null_count`, `nh_count` — advance tree insertion indices
+- `nullifiers`, `note_hashes` — carried as args purely for DA (no processing in public)
 
-It does **not** accept or re-verify: `tube_vk_hash`, batch hashes, or tree start indices.
+Not re-accepted in public: `tube_vk_hash`, batch hashes, tree start indices.
 
 ### Rationale
 
-In Aztec's execution model, when a private function enqueues a public function call, the kernel proof commits to the exact arguments of that enqueued call. The sequencer must execute the public function with precisely those committed arguments — any deviation invalidates the kernel proof. This means:
+Aztec's kernel proof commits to the exact arguments of an enqueued public call. The sequencer must execute public with precisely those committed arguments; deviation invalidates the kernel proof. So `submit_batch`'s verified data can be forwarded to `settle_batch` as arguments without re-checking them in public.
 
-1. `submit_batch` verifies the tube proof and extracts the correct public inputs.
-2. `submit_batch` constructs the `settle_batch` arguments from verified data.
-3. The kernel proof cryptographically binds those arguments to the transaction.
-4. No actor can modify the arguments between private execution and public execution.
-
-Re-verifying hashes, VK identity, or tree indices in the public function is therefore redundant with the protocol's proof model. Each redundant field adds 32 bytes of DA cost per batch with no security benefit beyond catching bugs in our own `submit_batch` implementation.
-
-The one check that remains — `old_state_root == storage.latest_root` — is fundamentally different. It guards against a runtime condition (two valid batches built against the same state, where only the first should succeed) that cannot be caught by proof verification alone, since private functions can only read historical public state.
+The one runtime check that remains — `old_state_root == storage.latest_root` — guards against two valid batches built against the same historical state. That's not something proof verification can catch (private reads historical public state).
 
 ### Walkback
 
-If the kernel proof trust model is considered too aggressive a dependency — for example, during early development when the private function is changing frequently and bugs in argument construction are likely — a moderate alternative is available:
-
-Keep all verification checks in `settle_batch` (hash checks, VK hash check, tree index checks) and re-add public logs for nullifiers and note hashes. This restores the original trust model and gives indexers a standard log-based subscription API at the cost of higher DA.
+If the kernel-proof trust model is too aggressive during development, re-add hash / VK / tree-index checks in `settle_batch` and emit public logs for nullifiers + note hashes. Costs ~29 extra fields per batch (~928 bytes); restores a redundant check layer.
 
 ### Impact
 
 | | Args (fields) | Logs (fields) | Total DA (fields) | Total DA (bytes) |
-|---|--------|-------|-------|-------|
+|---|---|---|---|---|
 | Before | 33 | 24 | 57 | 1,824 |
 | After | 28 | 0 | 28 | 896 |
 | Reduction | | | 29 | 928 (51%) |
 
-## 2. No Public Logs — DA via Function Arguments Only
+## 2. No public logs — DA via function arguments only
 
-### Decision
+Function arguments already land in the transaction envelope posted to DA. Public logs are a separate, additive DA channel. Emitting the same data through both doubles DA with no availability gain.
 
-`settle_batch` does not emit any public logs. All batch data (nullifiers, note hashes, deposit nullifiers, withdrawal claims) is made available for data availability exclusively through the public function arguments.
+An L3 this specific (nullifier trees, deposit/withdrawal lifecycle) needs a purpose-built indexer regardless — no generic Aztec indexer understands the state model. A custom indexer decoding `settle_batch` arguments from the call stack is equivalent to consuming logs and costs no more.
 
-### Rationale
+Walkback: re-emit `nullifiers` and `note_hashes` as public logs (adds 16 fields / 512 bytes per batch) if third-party tooling needs log-based discovery.
 
-In Aztec, public function arguments are part of the transaction envelope posted to DA. Public logs are a separate DA channel — also posted. Emitting data as both function arguments and logs doubles the DA cost for that data with no additional availability.
+## 3. Two aggregation paths — Path B primary, Path C secondary
 
-Public logs exist to give indexers a standardized subscription API (`getLogs` by contract address and event type). However, this L3 requires a purpose-built indexer regardless — no generic Aztec indexer understands the L3 state model (nullifier trees, note hash trees, deposit/withdrawal lifecycle). A custom indexer that already knows the contract ABI can decode `settle_batch` arguments from the transaction call stack directly.
+The repo implements both aggregation styles and terminates both at the same 500-field `UltraHonkZKProof`.
 
-### Walkback
+### Path B — pure recursive UltraHonk (primary)
 
-If indexer tooling evolves to make log-based discovery significantly easier, or if third-party indexers need to consume L3 state without custom ABI knowledge, public logs can be re-added for nullifiers and note hashes:
+`batch_app_standalone` → `wrapper` → `wrapper_{16,32,64}`. No IVC, no Chonk, no IPA. The root blocker that previously forced IVC — `batch_app`'s databus annotation (`return_data BatchOutput`) requiring MegaCircuitBuilder — is bypassed by `batch_app_standalone`, which uses explicit `pub Field` outputs. Circuit logic is otherwise identical.
 
-```noir
-self.context.emit_public_log_unsafe(0, nullifiers);
-self.context.emit_public_log_unsafe(1, note_hashes);
-```
+With the ECCVM bottleneck eliminated, opcode count scales linearly with batch size (see table below). Batch=8 is the current setting for memory, not a protocol limit.
 
-This would add 16 fields (512 bytes) of DA per batch. Deposit nullifiers and withdrawal claims should still not be logged since they are already in the function arguments and are needed there for state mutations.
+| Batch size | ACIR opcodes | Per-tx opcodes |
+|---|---|---|
+| 4 | 14,661 | 3,665 |
+| 8 | 29,313 | 3,664 |
+| 16 | 58,617 | 3,664 |
+| 32 | 117,225 | 3,663 |
+| 64 | 234,441 | 3,663 |
+| 128 | 468,873 | 3,663 |
 
-## 3. Recursive UltraHonk Pipeline (replacing IVC/Chonk)
+### Path C — IVC + `pair_tube` root-rollup (secondary)
 
-### Decision
+Retains `batch_app` + IVC kernel chain + tube per sub-batch; aggregates two tubes via `pair_tube` using `PROOF_TYPE_ROOT_ROLLUP_HONK` to finalize accumulated IPA claims in-circuit (see `SILENT_FAILURE_REVIEW.md`). `pair_tube`'s output is a 500-field `UltraHonkZKProof` matching the contract ABI.
 
-The proving pipeline uses a two-stage recursive UltraHonk architecture instead of the five-stage IVC/Chonk pipeline:
+### Why B is primary
 
-**Old pipeline (5 stages):** batch_app -> init_kernel -> tail_kernel -> hiding_kernel (Chonk) -> tube (UltraHonk)
+- Uniform UltraHonk / BN254 throughout; no foreign-field / non-native arithmetic.
+- Aggregator is cheap (`wrapper_16` gate count is two `verify_honk_proof`s).
+- No ECCVM-imposed batch cap.
 
-**New pipeline (2 stages):** batch_app_standalone (UltraHonk) -> wrapper (UltraHonk)
-
-The three IVC kernel circuits, the Chonk proving step, and the tube circuit are eliminated. The `AztecClientBackend` dependency is removed entirely.
-
-### Rationale
-
-The IVC/Chonk pipeline existed to satisfy Aztec's kernel accumulation API. The three kernel circuits (init, tail, hiding) are trivial pass-throughs (~10 lines each) that add no security or functionality. The Chonk step introduces the ECCVM 32768-row limit that caps batch size at 4 transactions.
-
-The root blocker to replacing this pipeline was that `batch_app` used `return_data BatchOutput` -- a Noir databus annotation that creates CallData/ReturnData block constraints requiring MegaCircuitBuilder. UltraHonkBackend cannot prove circuits with these constraints.
-
-The solution: `batch_app_standalone` replaces `-> return_data BatchOutput` with explicit `pub Field` outputs. The circuit logic is identical. The wrapper circuit then verifies the batch_app_standalone UltraHonk proof and re-exposes the same 8 public inputs for L2 contract verification.
-
-### Batch Size Scaling
-
-With the ECCVM bottleneck eliminated, the circuit compiles and scales linearly at any batch size:
-
-| Batch Size | ACIR Opcodes | Per-TX Opcodes | Compiles? |
-|---|---|---|---|
-| 4 | 14,661 | 3,665 | Yes |
-| 8 | 29,313 | 3,664 | Yes |
-| 16 | 58,617 | 3,664 | Yes |
-| 32 | 117,225 | 3,663 | Yes |
-| 64 | 234,441 | 3,663 | Yes |
-| 128 | 468,873 | 3,663 | Yes |
-
-The ceiling is no longer a hard protocol limit. It is determined by proving time (roughly linear with circuit size) and prover memory.
-
-### Measured Performance (batch size 4)
-
-At batch size 4, the recursive pipeline produces a valid end-to-end proof (deposit, payment, withdrawal, claim) with the following per-batch timing:
-
-- batch_app_standalone UltraHonk prove: ~60-80s
-- wrapper UltraHonk prove: ~40-50s
-- Total per batch: ~110-130s
-
-The wrapper circuit is constant-size regardless of batch size (it verifies one UltraHonk proof). Only the batch_app_standalone circuit grows with batch size.
+Path C's per-tx proving is cheaper (IVC folding), which matters at larger batch counts — see `SCALING.md`. Its aggregator is expensive because finalizing IPA in-circuit means simulating Grumpkin EC ops inside a BN254 UltraHonk circuit.
 
 ### Walkback
 
-The IVC/Chonk pipeline remains in the codebase and is untouched. It can be used via `step4-full-lifecycle.ts` with the original `batch_app`, kernel circuits, and tube circuit. The recursive pipeline is a parallel path tested via `step5-recursive-poc.ts`.
-
-If Aztec raises the ECCVM row limit or provides a MegaHonk backend in bb.js, the IVC pipeline could become competitive again for larger batch sizes. The recursive pipeline would still be preferred if UltraHonk proving is faster than Chonk for equivalent circuit sizes.
-
-### Key Files
-
-| File | Role |
-|---|---|
-| `circuits/batch_app_standalone/src/main.nr` | batch_app with `pub Field` outputs (no databus) |
-| `circuits/wrapper/src/main.nr` | Verifies batch_app UltraHonk proof |
-| `tests/harness/prover-recursive.ts` | `buildBatchProofRecursive()` + `computeWrapperVkHash()` |
-| `tests/step5-recursive-poc.ts` | Full lifecycle e2e test |
-| `tests/bench-recursive-100tx.ts` | 100-tx throughput benchmark |
+Both paths coexist in the codebase. If the balance tilts (e.g. ECCVM row limit raised, or a MegaHonk-style backend in bb.js) Path C's aggregator becomes cheaper and could be promoted.

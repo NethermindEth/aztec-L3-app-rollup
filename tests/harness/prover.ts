@@ -590,7 +590,9 @@ export async function computeTubeVkHash(api: Barretenberg): Promise<{ vkHash: Fr
 export async function computePairTubeVkHash(api: Barretenberg): Promise<{ vkHash: Fr; vk: Uint8Array }> {
   const circuit = loadCircuit("pair_tube");
   const backend = new UltraHonkBackend(circuit.bytecode, api);
-  const vk = await backend.getVerificationKey({ verifierTarget: "noir-rollup" });
+  // pair_tube finalizes IPA in-circuit via ROOT_ROLLUP_HONK, so its own
+  // proof is emitted at noir-recursive target (500-field UltraHonkZK).
+  const vk = await backend.getVerificationKey({ verifierTarget: "noir-recursive" });
   const vkFields = vkToFields(vk);
   const vkHash = await p2h(vkFields);
   return { vkHash, vk };
@@ -599,9 +601,11 @@ export async function computePairTubeVkHash(api: Barretenberg): Promise<{ vkHash
 // -------------------------------------------------------------------------
 // buildPairTubeProof -- Path C: aggregate 2 IVC tube proofs via pair_tube.
 //
-// Uses verify_rolluphonk_proof (PROOF_TYPE_ROLLUP_HONK = 4) to verify
-// noir-rollup tube proofs (519 fields with IPA material) inside the
-// pair_tube circuit, then outputs a single merged proof.
+// Consumes two 519-field noir-rollup tube proofs and verifies them inside
+// pair_tube under ROOT_ROLLUP_HONK (proof type 5), which finalizes both
+// accumulated IPA claims natively. pair_tube's output therefore carries no
+// IPA material and is emitted at noir-recursive target as a 500-field
+// UltraHonkZK proof that matches the contract ABI.
 // -------------------------------------------------------------------------
 
 export interface PairTubeArtifact {
@@ -706,14 +710,17 @@ export async function buildPairTubeProof(
   });
   console.log("    pair_tube executed");
 
-  // 7. Prove pair_tube at noir-rollup target for L2 submission.
-  console.log("    Proving pair_tube (UltraHonk, noir-rollup)...");
+  // 7. Prove pair_tube at noir-recursive target for L2 submission.
+  //    IPA was finalized in-circuit by ROOT_ROLLUP_HONK, so the emitted
+  //    proof is a clean 500-field UltraHonkZK compatible with the contract's
+  //    verify_honk_proof / UltraHonkZKProof ABI.
+  console.log("    Proving pair_tube (UltraHonk, noir-recursive)...");
   const pairBackend = new UltraHonkBackend(pairCircuit.bytecode, api);
-  const pairProofData = await pairBackend.generateProof(pairWitness, { verifierTarget: "noir-rollup" });
-  const pairVk = await pairBackend.getVerificationKey({ verifierTarget: "noir-rollup" });
+  const pairProofData = await pairBackend.generateProof(pairWitness, { verifierTarget: "noir-recursive" });
+  const pairVk = await pairBackend.getVerificationKey({ verifierTarget: "noir-recursive" });
   console.log(`    pair_tube proof: ${pairProofData.proof.length} bytes`);
 
-  const pairValid = await pairBackend.verifyProof(pairProofData, { verifierTarget: "noir-rollup" });
+  const pairValid = await pairBackend.verifyProof(pairProofData, { verifierTarget: "noir-recursive" });
   console.log(`    pair_tube verified: ${pairValid}`);
 
   return {

@@ -1,18 +1,19 @@
 /**
  * step10-ivc-merged-16slot.ts
  *
- * Path C: IVC sub-batch proving + pair_tube RollupHonk aggregation.
+ * Path C: IVC sub-batch proving + pair_tube root-rollup aggregation.
  *
  * Combines the fast IVC sub-batch proving (~4 GiB RAM each, concurrent-friendly)
- * with DA-efficient proof aggregation via a new pair_tube circuit that uses
- * verify_rolluphonk_proof to verify tube proofs (519-field RollupHonk with IPA).
+ * with DA-efficient proof aggregation via a pair_tube circuit that verifies
+ * each tube proof under ROOT_ROLLUP_HONK (proof type 5), finalizing both
+ * accumulated IPA claims natively in-circuit.
  *
  * Flow:
- *   tube[noir-rollup] (x2, concurrent) -> pair_tube[noir-rollup] -> submit_merged_batch
+ *   tube[noir-rollup] (x2, concurrent) -> pair_tube[noir-recursive] -> submit_merged_batch
  *
- * No wrapper step needed — pair_tube directly verifies tube proofs using the
- * RollupHonk verification path (PROOF_TYPE_ROLLUP_HONK = 4), which handles
- * the IPA material that prevented noir-recursive tube proving.
+ * pair_tube's output carries no IPA material, so it is emitted at
+ * noir-recursive target as a 500-field UltraHonkZK proof matching the
+ * contract's UltraHonkZKProof ABI — no SDK truncation.
  *
  * Total slot capacity: 16 (2 real deposits + 14 padding).
  */
@@ -87,7 +88,7 @@ async function cloneL3StateWithDeposit(
 }
 
 async function main() {
-  console.log("=== step10: Path C -- IVC sub-batches + pair_tube RollupHonk aggregation ===\n");
+  console.log("=== step10: Path C -- IVC sub-batches + pair_tube root-rollup aggregation ===\n");
 
   console.log(`Connecting to ${NODE_URL}...`);
   const node = createAztecNodeClient(NODE_URL);
@@ -189,12 +190,20 @@ async function main() {
   console.log("  State chain A.new == B.old: OK\n");
 
   // pair_tube aggregation
-  console.log("Running pair_tube RollupHonk aggregation...");
+  console.log("Running pair_tube root-rollup aggregation...");
   const pairStart = performance.now();
   const pairArtifact = await buildPairTubeProof(api, artifactA, artifactB);
   const pairMs = performance.now() - pairStart;
+  const pairProofFieldCount = Math.floor(pairArtifact.pairProof.length / 32);
   console.log(`  pair_tube prove: ${fmt(pairMs)}`);
-  console.log(`  merged proof: ${pairArtifact.pairProof.length} bytes, VK: ${pairArtifact.pairVk.length} bytes\n`);
+  console.log(`  merged proof: ${pairArtifact.pairProof.length} bytes (${pairProofFieldCount} fields), VK: ${pairArtifact.pairVk.length} bytes\n`);
+  if (pairProofFieldCount === 500) {
+    console.log("  ^ 500 fields -- matches contract UltraHonkZKProof ABI (no SDK truncation)\n");
+  } else if (pairProofFieldCount === 519) {
+    console.log("  ^ 519 fields -- will be silently truncated to 500 by the SDK on submit\n");
+  } else {
+    console.log(`  ^ unexpected field count (${pairProofFieldCount}); check pair_tube proving target\n`);
+  }
 
   const totalProveMs = proveConcurrentMs + pairMs;
 
@@ -238,7 +247,7 @@ async function main() {
   // Metrics
   const metrics = {
     variant: "ivc-merged-pair-tube",
-    description: "Path C: IVC sub-batches (concurrent) + pair_tube RollupHonk aggregation -> single merged proof",
+    description: "Path C: IVC sub-batches (concurrent) + pair_tube root-rollup aggregation -> single merged proof",
     subBatches: 2,
     realTxsPerSubBatch: 1,
     paddingPerSubBatch: 7,
@@ -254,6 +263,7 @@ async function main() {
     l2: { submitWallClockMs: submitMs, nonceAdvance: Number(nonce) },
     proofSizes: {
       pairTubeProofBytes: pairArtifact.pairProof.length,
+      pairTubeProofFields: pairProofFieldCount,
       pairTubeVkBytes: pairArtifact.pairVk.length,
       tubeProofBytesPerSubBatch: artifactA.tubeProof.length,
     },
@@ -262,7 +272,7 @@ async function main() {
   console.log(`Metrics written to ${METRICS_OUT}`);
 
   console.log("\n=== step10 SUMMARY ===\n");
-  console.log(`  Variant: Path C -- IVC sub-batches + pair_tube RollupHonk aggregation`);
+  console.log(`  Variant: Path C -- IVC sub-batches + pair_tube root-rollup aggregation`);
   console.log(`  Sub-batches: 2 x (1 real + 7 padding) at batch=8  -> 16 slot capacity`);
   console.log(`  Per-tx proofs wall-clock:        ${fmt(perTxMs)}`);
   console.log(`  Concurrent IVC batch proving:    ${fmt(proveConcurrentMs)}`);
