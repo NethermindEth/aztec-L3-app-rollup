@@ -36,7 +36,7 @@ The proof-type constant isn't exposed as a helper in `bb_proof_verification` at 
 
 **Empirical confirmation** (step10, 2026-04-17):
 
-- `pair_tube` proof: **500 fields / 16,000 bytes** (log: `Generated proof for circuit with 8 public inputs and 500 fields`).
+- `pair_tube` proof: **500 fields / 16,000 bytes** (log: `Generated proof for circuit with 8 public inputs and 500 fields`). Phase 2 (note-discovery, 2026-04-20) widened `BatchOutput` by one field, so a fresh step10 run reports 9 public inputs; the format-fix conclusion (no 519→500 truncation, 500-field proof output) is unaffected.
 - In-circuit verify: `pair_tube verified: true`.
 - `submit_merged_batch`: nonce advanced to 1, root updated. No SDK truncation.
 

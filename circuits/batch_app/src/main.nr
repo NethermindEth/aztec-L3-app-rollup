@@ -1,5 +1,6 @@
 use l3_types::{
     TREE_DEPTH, MAX_NOTES_PER_TX, MAX_OUTPUTS_PER_TX, TX_PUBLIC_INPUT_COUNT,
+    TX_LOG_PAYLOAD_LEN, TX_LOGS_COMMIT_INDEX,
     BatchOutput, IndexedLeaf, poseidon2_hash,
     compute_state_root, compute_merkle_root,
 };
@@ -10,6 +11,7 @@ use bb_proof_verification::{verify_honk_proof, UltraHonkVerificationKey, UltraHo
 global MAX_BATCH_SIZE: u32 = 8;
 global BATCH_NULLIFIERS_COUNT: u32 = 16; // MAX_BATCH_SIZE * MAX_NOTES_PER_TX
 global BATCH_NOTE_HASHES_COUNT: u32 = 16; // MAX_BATCH_SIZE * MAX_OUTPUTS_PER_TX
+global BATCH_LOGS_FLAT_LEN: u32 = 256;    // MAX_BATCH_SIZE * TX_LOG_PAYLOAD_LEN = 8 * 32
 
 fn main(
     // --- private inputs ---
@@ -51,7 +53,13 @@ fn main(
     // -- Append-only note hash tree insertion witnesses --
     note_hash_insertion_siblings: [[Field; TREE_DEPTH]; BATCH_NOTE_HASHES_COUNT],
 
-    // These 8 fields flow to the next kernel via return_data BatchOutput.
+    // -- Per-tx encrypted log payloads (witness) --
+    // Shape: [MAX_BATCH_SIZE tx slots][MAX_OUTPUTS_PER_TX * PRIVATE_LOG_SIZE_IN_FIELDS = 32].
+    // The per-tx circuit has already asserted poseidon2_hash(private_logs[i]) equals
+    // its logs_commit public input; batch_app just re-checks + aggregates.
+    private_logs: [[Field; TX_LOG_PAYLOAD_LEN]; MAX_BATCH_SIZE],
+
+    // These 9 fields flow to the next kernel via return_data BatchOutput.
     // They are NOT declared pub because in the IVC context, pub inputs inflate
     // the VK's num_public_inputs beyond the IVC IO size, breaking accumulation.
     // The values are still constrained by asserts in the circuit body.
@@ -61,6 +69,7 @@ fn main(
     note_hashes_batch_hash: Field,
     deposit_nullifiers_hash: Field,
     withdrawal_claims_hash: Field,
+    private_logs_hash: Field,
     nullifier_tree_start_index: Field,
     note_hash_tree_start_index: Field,
 ) -> return_data BatchOutput {
@@ -234,6 +243,15 @@ fn main(
         if is_withdraw {
             withdrawal_claims[i] = tx_public_inputs[i][MAX_NOTES_PER_TX];
         }
+
+        // --- Log aggregation ---
+        // Re-hash the wallet-supplied per-tx log payload and assert it matches
+        // the logs_commit public input of tx i. Uniform across real + padding
+        // slots so every batch has a well-defined log commitment.
+        assert(
+            poseidon2_hash(private_logs[i]) == tx_public_inputs[i][TX_LOGS_COMMIT_INDEX],
+            "per-tx logs commit mismatch",
+        );
     }
 
     // 3. Final tree roots.
@@ -264,6 +282,18 @@ fn main(
         "withdrawal claims hash mismatch",
     );
 
+    // Flatten all tx log payloads into a single batch-wide array and hash.
+    let mut logs_flat: [Field; BATCH_LOGS_FLAT_LEN] = [0; BATCH_LOGS_FLAT_LEN];
+    for i in 0..MAX_BATCH_SIZE {
+        for j in 0..TX_LOG_PAYLOAD_LEN {
+            logs_flat[i * TX_LOG_PAYLOAD_LEN + j] = private_logs[i][j];
+        }
+    }
+    assert(
+        poseidon2_hash(logs_flat) == private_logs_hash,
+        "private logs batch hash mismatch",
+    );
+
     BatchOutput {
         old_state_root,
         new_state_root,
@@ -271,6 +301,7 @@ fn main(
         note_hashes_root: note_hashes_batch_hash,
         deposit_nullifiers_hash,
         withdrawal_claims_hash,
+        private_logs_hash,
         nullifier_tree_start_index: nullifier_tree_start_index,
         note_hash_tree_start_index: note_hash_tree_start_index,
     }

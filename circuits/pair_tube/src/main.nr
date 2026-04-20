@@ -29,11 +29,13 @@ global PROOF_TYPE_ROOT_ROLLUP_HONK: u32 = 5;
 global SUB_BATCH_SIZE: u32 = 8;
 global SUB_BATCH_NULLIFIERS: u32 = 16;  // SUB_BATCH_SIZE * 2
 global SUB_BATCH_NOTE_HASHES: u32 = 16; // SUB_BATCH_SIZE * 2
+global SUB_BATCH_LOGS_FLAT: u32 = 256;  // SUB_BATCH_SIZE * TX_LOG_PAYLOAD_LEN (8 * 32)
 
 // Merged-batch array sizes (doubled):
 global MERGED_BATCH_SIZE: u32 = 16;
 global MERGED_BATCH_NULLIFIERS: u32 = 32;
 global MERGED_BATCH_NOTE_HASHES: u32 = 32;
+global MERGED_LOGS_FLAT: u32 = 512;     // 2 * SUB_BATCH_LOGS_FLAT
 
 // Tube BatchOutput layout (shared between A and B tube proofs):
 //   [0] old_state_root
@@ -42,9 +44,10 @@ global MERGED_BATCH_NOTE_HASHES: u32 = 32;
 //   [3] note_hashes_batch_hash
 //   [4] deposit_nullifiers_hash
 //   [5] withdrawal_claims_hash
-//   [6] nullifier_tree_start_index
-//   [7] note_hash_tree_start_index
-global TUBE_PUB_COUNT: u32 = 8;
+//   [6] private_logs_hash
+//   [7] nullifier_tree_start_index
+//   [8] note_hash_tree_start_index
+global TUBE_PUB_COUNT: u32 = 9;
 
 fn main(
     // --- private inputs ---
@@ -65,11 +68,13 @@ fn main(
     note_hashes_a: [Field; SUB_BATCH_NOTE_HASHES],
     deposits_a: [Field; SUB_BATCH_SIZE],
     withdrawals_a: [Field; SUB_BATCH_SIZE],
+    private_logs_a: [Field; SUB_BATCH_LOGS_FLAT],
 
     nullifiers_b: [Field; SUB_BATCH_NULLIFIERS],
     note_hashes_b: [Field; SUB_BATCH_NOTE_HASHES],
     deposits_b: [Field; SUB_BATCH_SIZE],
     withdrawals_b: [Field; SUB_BATCH_SIZE],
+    private_logs_b: [Field; SUB_BATCH_LOGS_FLAT],
 
     // --- public outputs (batch=16 merged shape, mirrors BatchOutput) ---
     old_state_root: pub Field,
@@ -78,6 +83,7 @@ fn main(
     merged_note_hashes_hash: pub Field,
     merged_deposit_nullifiers_hash: pub Field,
     merged_withdrawal_claims_hash: pub Field,
+    merged_private_logs_hash: pub Field,
     nullifier_tree_start_index: pub Field,
     note_hash_tree_start_index: pub Field,
 ) {
@@ -116,6 +122,10 @@ fn main(
         poseidon2_hash(withdrawals_a) == tube_public_inputs_a[5],
         "pair_tube: withdrawals_a hash mismatch",
     );
+    assert(
+        poseidon2_hash(private_logs_a) == tube_public_inputs_a[6],
+        "pair_tube: private_logs_a hash mismatch",
+    );
 
     assert(
         poseidon2_hash(nullifiers_b) == tube_public_inputs_b[2],
@@ -132,6 +142,10 @@ fn main(
     assert(
         poseidon2_hash(withdrawals_b) == tube_public_inputs_b[5],
         "pair_tube: withdrawals_b hash mismatch",
+    );
+    assert(
+        poseidon2_hash(private_logs_b) == tube_public_inputs_b[6],
+        "pair_tube: private_logs_b hash mismatch",
     );
 
     // 3. State-root chain: B's old root == A's new root.
@@ -150,11 +164,11 @@ fn main(
         if note_hashes_a[i] != 0 { nh_count_a += 1; }
     }
     assert(
-        tube_public_inputs_b[6] == tube_public_inputs_a[6] + null_count_a,
+        tube_public_inputs_b[7] == tube_public_inputs_a[7] + null_count_a,
         "pair_tube: nullifier tree index chain broken",
     );
     assert(
-        tube_public_inputs_b[7] == tube_public_inputs_a[7] + nh_count_a,
+        tube_public_inputs_b[8] == tube_public_inputs_a[8] + nh_count_a,
         "pair_tube: note hash tree index chain broken",
     );
 
@@ -163,6 +177,7 @@ fn main(
     let mut merged_note_hashes: [Field; MERGED_BATCH_NOTE_HASHES] = [0; MERGED_BATCH_NOTE_HASHES];
     let mut merged_deposits: [Field; MERGED_BATCH_SIZE] = [0; MERGED_BATCH_SIZE];
     let mut merged_withdrawals: [Field; MERGED_BATCH_SIZE] = [0; MERGED_BATCH_SIZE];
+    let mut merged_private_logs: [Field; MERGED_LOGS_FLAT] = [0; MERGED_LOGS_FLAT];
 
     for i in 0..SUB_BATCH_NULLIFIERS {
         merged_nullifiers[i] = nullifiers_a[i];
@@ -177,6 +192,10 @@ fn main(
         merged_deposits[SUB_BATCH_SIZE + i] = deposits_b[i];
         merged_withdrawals[i] = withdrawals_a[i];
         merged_withdrawals[SUB_BATCH_SIZE + i] = withdrawals_b[i];
+    }
+    for i in 0..SUB_BATCH_LOGS_FLAT {
+        merged_private_logs[i] = private_logs_a[i];
+        merged_private_logs[SUB_BATCH_LOGS_FLAT + i] = private_logs_b[i];
     }
 
     // 6. Expose merged public outputs.
@@ -199,11 +218,15 @@ fn main(
         "pair_tube: merged withdrawal claims hash mismatch",
     );
     assert(
-        nullifier_tree_start_index == tube_public_inputs_a[6],
+        merged_private_logs_hash == poseidon2_hash(merged_private_logs),
+        "pair_tube: merged private logs hash mismatch",
+    );
+    assert(
+        nullifier_tree_start_index == tube_public_inputs_a[7],
         "pair_tube: nullifier tree start index mismatch",
     );
     assert(
-        note_hash_tree_start_index == tube_public_inputs_a[7],
+        note_hash_tree_start_index == tube_public_inputs_a[8],
         "pair_tube: note hash tree start index mismatch",
     );
 }

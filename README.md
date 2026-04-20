@@ -32,7 +32,9 @@ User tx  ->  per-tx proof (UltraHonk)
 
 Both `submit_*` entry points consume a 500-field `UltraHonkZKProof`. Inner-VK chain binding is enforced at every aggregator level.
 
-Details: `AGGREGATION.md` (design comparison), `SCALING.md` (tree shape to 64/128), `DESIGN_DECISIONS.md` (DA minimization, IVC vs recursive rationale), `SILENT_FAILURE_REVIEW.md` (proof-verification gap analysis).
+**Note discovery.** Per-tx circuits thread a `logs_commit: pub Field` that batch_app aggregates into a `private_logs_hash` public input; `settle_batch*` carries the flat `[siloed_tag, ct_0..ct_14]` per-output log payload as calldata. Encryption is ONCHAIN_UNCONSTRAINED (Aztec v4.2 production mode) — the wallet library (`tests/messages/`) uses `@aztec/foundation` primitives (Grumpkin DH, AES-128-CBC, poseidon2) so recipient wallets can decrypt notes from calldata alone. See `tests/note-discovery.test.ts` for the end-to-end scan + decrypt round-trip.
+
+Details: `AGGREGATION.md` (design comparison), `SCALING.md` (tree shape + L1 DA to 64/128), `DESIGN_DECISIONS.md` (DA minimization, IVC vs recursive rationale, note-discovery extension), `SILENT_FAILURE_REVIEW.md` (proof-verification gap analysis).
 
 ## Prerequisites
 
@@ -120,7 +122,8 @@ docker compose down -v
 ```
 circuits/
   # Shared per-tx
-  types/ deposit/ payment/ withdraw/ padding/
+  types/                     (incl. src/messages/ -- note-discovery PrivateLog + constants)
+  deposit/ payment/ withdraw/ padding/
 
   # Path B (primary)
   batch_app_standalone/      Aggregates 8 txs, pub outputs (no databus)
@@ -144,6 +147,9 @@ contract_ivc/                L3IvcSettlement
 
 tests/
   harness/                   Shared state, prover (IVC + recursive), recursive-shapes
+  messages/                  Note-discovery TS lib: keys, tagging, encryption, wallet, indexer
+  messages-reference.test.ts Phase 1 -- TS primitives self-check
+  note-discovery.test.ts     Phase 4 -- end-to-end sender -> calldata -> recipient decrypt
   step5 / step9 / step11     Path B e2e
   step10                     Path C e2e
   step8                      Design A e2e (benchmark only)
@@ -159,3 +165,4 @@ tests/
 - **Batch size is 8 per sub-batch.** Chonk ECCVM caps IVC at 8; recursive has no protocol cap (see `DESIGN_DECISIONS.md` §3). Current setting is a memory choice.
 - **Harness proves 1 real tx per sub-batch.** Circuits support multi-tx (covered by Noir unit tests); the prover harness would need refactoring to chain intermediate state roots.
 - **No sequencer / no forced exit.** The prover is a test harness, not a production node. If the operator stops, users cannot withdraw without a new operator.
+- **Note-discovery encryption is ONCHAIN_UNCONSTRAINED.** The circuit asserts `poseidon2_hash(private_logs) == logs_commit` but does not prove the ciphertext decrypts to the committed note preimage. A malicious sender can publish garbage logs that recipients can't decrypt (liveness grief); note-hash safety holds via the separate tree commitment. Matches Aztec v4.2 production mode. See `DESIGN_DECISIONS.md` §2 extension.

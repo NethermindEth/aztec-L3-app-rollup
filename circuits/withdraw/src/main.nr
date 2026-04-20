@@ -1,5 +1,5 @@
 use l3_types::{
-    Note, IndexedLeaf, TREE_DEPTH, MAX_NOTES_PER_TX, MAX_OUTPUTS_PER_TX,
+    Note, IndexedLeaf, TREE_DEPTH, MAX_NOTES_PER_TX, MAX_OUTPUTS_PER_TX, TX_LOG_PAYLOAD_LEN,
     hash_pubkey, compute_nullifier, compute_state_root, derive_pubkey,
     verify_merkle_membership, verify_nullifier_non_membership,
     poseidon2_hash,
@@ -8,8 +8,8 @@ use l3_types::{
 // Withdraw circuit: consumes up to 2 L3 notes and produces an L2 claim
 // hash plus an optional change note.
 //
-// Public inputs (5 fields, matching batch_app layout):
-//   [nullifier_0, nullifier_1, l2_claim_hash, change_note_hash, state_root]
+// Public inputs (6 fields, matching batch_app layout):
+//   [nullifier_0, nullifier_1, l2_claim_hash, change_note_hash, state_root, logs_commit]
 fn main(
     // --- private inputs ---
     owner_secret: Field,
@@ -28,16 +28,20 @@ fn main(
     change_salt: Field,
     note_hash_tree_root: Field,
     nullifier_tree_root: Field,
+    private_logs: [Field; TX_LOG_PAYLOAD_LEN],
     // --- public inputs ---
     nullifiers: pub [Field; MAX_NOTES_PER_TX],
     note_hashes: pub [Field; MAX_OUTPUTS_PER_TX],
     state_root: pub Field,
+    logs_commit: pub Field,
 ) {
     // State root binds this proof to a specific L3 state.
     assert(
         compute_state_root(nullifier_tree_root, note_hash_tree_root) == state_root,
         "state root mismatch",
     );
+
+    assert(poseidon2_hash(private_logs) == logs_commit, "logs commit mismatch");
 
     assert(active_inputs[0] == 1, "first input must be active");
 

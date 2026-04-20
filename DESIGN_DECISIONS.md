@@ -28,11 +28,15 @@ If the kernel-proof trust model is too aggressive during development, re-add has
 
 ### Impact
 
+Per 8-slot settlement, before Phase 2 (no note-discovery logs):
+
 | | Args (fields) | Logs (fields) | Total DA (fields) | Total DA (bytes) |
 |---|---|---|---|---|
 | Before | 33 | 24 | 57 | 1,824 |
 | After | 28 | 0 | 28 | 896 |
 | Reduction | | | 29 | 928 (51%) |
+
+Phase 2 added `private_logs` as a public `settle_batch*` argument for PXE-style note discovery (see §2 extension). DA per 8-slot settle is now 308 fields / 9,856 B, dominated by the 256-field log payload. See `SCALING.md` for 16/64-slot figures.
 
 ## 2. No public logs — DA via function arguments only
 
@@ -41,6 +45,10 @@ Function arguments already land in the transaction envelope posted to DA. Public
 An L3 this specific (nullifier trees, deposit/withdrawal lifecycle) needs a purpose-built indexer regardless — no generic Aztec indexer understands the state model. A custom indexer decoding `settle_batch` arguments from the call stack is equivalent to consuming logs and costs no more.
 
 Walkback: re-emit `nullifiers` and `note_hashes` as public logs (adds 16 fields / 512 bytes per batch) if third-party tooling needs log-based discovery.
+
+### Extension: encrypted note logs for PXE-style discovery
+
+`settle_batch*` additionally accepts a `private_logs` array (16 fields per output × MAX_OUTPUTS_PER_TX × batch size) carrying Aztec-format `[siloed_tag, ct_0..ct_14]` encrypted note payloads produced by the sender's wallet (`tests/messages/`). The contract hash-checks this array against the proof's `private_logs_hash` public input and mutates no state from it; the indexer reads it from calldata. This keeps the DA pattern uniform with `nullifiers`/`note_hashes` and avoids an L2 log-emission round-trip. The encryption model is ONCHAIN_UNCONSTRAINED (matches Aztec v4.2 production mode): the circuit does not prove the ciphertext decrypts to the committed note preimage, so a malicious sender can grief their recipient but cannot corrupt note state. See `circuits/types/src/messages/` and the TypeScript cross-check in `tests/messages-reference.test.ts`.
 
 ## 3. Two aggregation paths — Path B primary, Path C secondary
 

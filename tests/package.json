@@ -17,7 +17,9 @@
     "verify:recursive": "npx tsx verify-with-bb-cli.ts",
     "verify:recursive:64": "INCLUDE_64=1 npx tsx verify-with-bb-cli.ts",
     "verify:recursive:negative": "npx tsx verify-negative-tests.ts",
-    "probe:chain:64": "npx tsx probe-chain-binding-64.ts"
+    "probe:chain:64": "npx tsx probe-chain-binding-64.ts",
+    "test:messages": "npx tsx messages-reference.test.ts",
+    "test:discovery": "npx tsx note-discovery.test.ts"
   },
   "dependencies": {
     "@aztec/accounts": "4.2.0-nightly.20260408",

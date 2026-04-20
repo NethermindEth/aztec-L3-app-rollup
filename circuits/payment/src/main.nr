@@ -1,14 +1,17 @@
 use l3_types::{
-    Note, IndexedLeaf, TREE_DEPTH, MAX_NOTES_PER_TX, MAX_OUTPUTS_PER_TX,
-    hash_pubkey, compute_nullifier, compute_state_root, derive_pubkey,
+    Note, IndexedLeaf, TREE_DEPTH, MAX_NOTES_PER_TX, MAX_OUTPUTS_PER_TX, TX_LOG_PAYLOAD_LEN,
+    hash_pubkey, compute_nullifier, compute_state_root, derive_pubkey, poseidon2_hash,
     verify_merkle_membership, verify_nullifier_non_membership,
 };
 
 // Payment circuit: consumes up to 2 input notes, produces a recipient note
 // and optionally a change note back to the sender.
 //
-// Public inputs (5 fields, matching batch_app layout):
-//   [nullifier_0, nullifier_1, recipient_note_hash, change_note_hash, state_root]
+// Public inputs (6 fields, matching batch_app layout):
+//   [nullifier_0, nullifier_1, recipient_note_hash, change_note_hash, state_root, logs_commit]
+//
+// logs_commit is unconstrained content-wise (ONCHAIN_UNCONSTRAINED delivery);
+// the circuit only asserts it is the poseidon2 of the wallet-supplied log bytes.
 fn main(
     // --- private inputs ---
     owner_secret: Field,
@@ -26,11 +29,15 @@ fn main(
     recipient_amount: Field,
     note_hash_tree_root: Field,
     nullifier_tree_root: Field,
+    private_logs: [Field; TX_LOG_PAYLOAD_LEN],
     // --- public inputs ---
     nullifiers: pub [Field; MAX_NOTES_PER_TX],
     note_hashes: pub [Field; MAX_OUTPUTS_PER_TX],
     state_root: pub Field,
+    logs_commit: pub Field,
 ) {
+    assert(poseidon2_hash(private_logs) == logs_commit, "logs commit mismatch");
+
     // State root binds this proof to a specific L3 state.
     assert(
         compute_state_root(nullifier_tree_root, note_hash_tree_root) == state_root,

@@ -14,16 +14,18 @@ use bb_proof_verification::{verify_honk_proof, UltraHonkVerificationKey, UltraHo
 global INNER_BATCH_SIZE: u32 = 16;
 global INNER_NULLIFIERS: u32 = 32;
 global INNER_NOTE_HASHES: u32 = 32;
+global INNER_LOGS_FLAT: u32 = 512;   // 16 * TX_LOG_PAYLOAD_LEN
 
 // Output (32-slot merged) array sizes:
 global BATCH_32_SIZE: u32 = 32;
 global BATCH_32_NULLIFIERS: u32 = 64;
 global BATCH_32_NOTE_HASHES: u32 = 64;
+global BATCH_32_LOGS_FLAT: u32 = 1024; // 2 * INNER_LOGS_FLAT
 
-// Inner wrapper_16 public-input layout (9 fields):
-//   [0..7] BatchOutput
-//   [8]    wrapper_vk_hash (inner VK binding from wrapper_16)
-global INNER_PUB_COUNT: u32 = 9;
+// Inner wrapper_16 public-input layout (10 fields):
+//   [0..8] BatchOutput (9 fields incl. private_logs_hash)
+//   [9]    wrapper_vk_hash (inner VK binding from wrapper_16)
+global INNER_PUB_COUNT: u32 = 10;
 
 fn main(
     // --- private inputs ---
@@ -44,11 +46,13 @@ fn main(
     note_hashes_a: [Field; INNER_NOTE_HASHES],
     deposits_a: [Field; INNER_BATCH_SIZE],
     withdrawals_a: [Field; INNER_BATCH_SIZE],
+    private_logs_a: [Field; INNER_LOGS_FLAT],
 
     nullifiers_b: [Field; INNER_NULLIFIERS],
     note_hashes_b: [Field; INNER_NOTE_HASHES],
     deposits_b: [Field; INNER_BATCH_SIZE],
     withdrawals_b: [Field; INNER_BATCH_SIZE],
+    private_logs_b: [Field; INNER_LOGS_FLAT],
 
     // --- public outputs (32-slot doubly-merged + 2 VK-chain fields) ---
     old_state_root: pub Field,
@@ -57,6 +61,7 @@ fn main(
     merged_note_hashes_hash: pub Field,
     merged_deposit_nullifiers_hash: pub Field,
     merged_withdrawal_claims_hash: pub Field,
+    merged_private_logs_hash: pub Field,
     nullifier_tree_start_index: pub Field,
     note_hash_tree_start_index: pub Field,
     out_wrapper_vk_hash: pub Field,  // wrapper VK hash propagated from inner
@@ -83,6 +88,10 @@ fn main(
         poseidon2_hash(withdrawals_a) == w16_public_inputs_a[5],
         "wrapper_32: withdrawals_a hash mismatch",
     );
+    assert(
+        poseidon2_hash(private_logs_a) == w16_public_inputs_a[6],
+        "wrapper_32: private_logs_a hash mismatch",
+    );
 
     assert(
         poseidon2_hash(nullifiers_b) == w16_public_inputs_b[2],
@@ -99,6 +108,10 @@ fn main(
     assert(
         poseidon2_hash(withdrawals_b) == w16_public_inputs_b[5],
         "wrapper_32: withdrawals_b hash mismatch",
+    );
+    assert(
+        poseidon2_hash(private_logs_b) == w16_public_inputs_b[6],
+        "wrapper_32: private_logs_b hash mismatch",
     );
 
     // 3. State-root chain: B's old root == A's new root.
@@ -117,11 +130,11 @@ fn main(
         if note_hashes_a[i] != 0 { nh_count_a += 1; }
     }
     assert(
-        w16_public_inputs_b[6] == w16_public_inputs_a[6] + null_count_a,
+        w16_public_inputs_b[7] == w16_public_inputs_a[7] + null_count_a,
         "wrapper_32: nullifier tree index chain broken",
     );
     assert(
-        w16_public_inputs_b[7] == w16_public_inputs_a[7] + nh_count_a,
+        w16_public_inputs_b[8] == w16_public_inputs_a[8] + nh_count_a,
         "wrapper_32: note hash tree index chain broken",
     );
 
@@ -130,6 +143,7 @@ fn main(
     let mut merged_note_hashes: [Field; BATCH_32_NOTE_HASHES] = [0; BATCH_32_NOTE_HASHES];
     let mut merged_deposits: [Field; BATCH_32_SIZE] = [0; BATCH_32_SIZE];
     let mut merged_withdrawals: [Field; BATCH_32_SIZE] = [0; BATCH_32_SIZE];
+    let mut merged_private_logs: [Field; BATCH_32_LOGS_FLAT] = [0; BATCH_32_LOGS_FLAT];
 
     for i in 0..INNER_NULLIFIERS {
         merged_nullifiers[i] = nullifiers_a[i];
@@ -144,6 +158,10 @@ fn main(
         merged_deposits[INNER_BATCH_SIZE + i] = deposits_b[i];
         merged_withdrawals[i] = withdrawals_a[i];
         merged_withdrawals[INNER_BATCH_SIZE + i] = withdrawals_b[i];
+    }
+    for i in 0..INNER_LOGS_FLAT {
+        merged_private_logs[i] = private_logs_a[i];
+        merged_private_logs[INNER_LOGS_FLAT + i] = private_logs_b[i];
     }
 
     // 6. Expose merged public outputs.
@@ -166,23 +184,27 @@ fn main(
         "wrapper_32: merged withdrawal claims hash mismatch",
     );
     assert(
-        nullifier_tree_start_index == w16_public_inputs_a[6],
+        merged_private_logs_hash == poseidon2_hash(merged_private_logs),
+        "wrapper_32: merged private logs hash mismatch",
+    );
+    assert(
+        nullifier_tree_start_index == w16_public_inputs_a[7],
         "wrapper_32: nullifier tree start index mismatch",
     );
     assert(
-        note_hash_tree_start_index == w16_public_inputs_a[7],
+        note_hash_tree_start_index == w16_public_inputs_a[8],
         "wrapper_32: note hash tree start index mismatch",
     );
 
-    // 7. Inner VK chain: both halves agreed on wrapper_vk_hash (PI[8]).
+    // 7. Inner VK chain: both halves agreed on wrapper_vk_hash (PI[9]).
     //    Propagate it plus our own w16_vk_hash so wrapper_64 / contract
     //    can bind both levels.
     assert(
-        w16_public_inputs_a[8] == w16_public_inputs_b[8],
+        w16_public_inputs_a[9] == w16_public_inputs_b[9],
         "wrapper_32: inner wrapper_vk_hash mismatch between halves",
     );
     assert(
-        out_wrapper_vk_hash == w16_public_inputs_a[8],
+        out_wrapper_vk_hash == w16_public_inputs_a[9],
         "wrapper_32: out wrapper vk hash mismatch",
     );
     assert(

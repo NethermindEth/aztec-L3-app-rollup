@@ -14,6 +14,7 @@ fn main(
     note_hashes_batch_hash: pub Field,
     deposit_nullifiers_hash: pub Field,
     withdrawal_claims_hash: pub Field,
+    private_logs_hash: pub Field,
     nullifier_tree_start_index: pub Field,
     note_hash_tree_start_index: pub Field,
 ) {
@@ -32,6 +33,7 @@ fn main(
     assert(batch_app_public_inputs[3] == note_hashes_batch_hash);
     assert(batch_app_public_inputs[4] == deposit_nullifiers_hash);
     assert(batch_app_public_inputs[5] == withdrawal_claims_hash);
-    assert(batch_app_public_inputs[6] == nullifier_tree_start_index);
-    assert(batch_app_public_inputs[7] == note_hash_tree_start_index);
+    assert(batch_app_public_inputs[6] == private_logs_hash);
+    assert(batch_app_public_inputs[7] == nullifier_tree_start_index);
+    assert(batch_app_public_inputs[8] == note_hash_tree_start_index);
 }

@@ -19,14 +19,19 @@ pub contract L3IvcSettlement {
 
     // IVC pipeline batch sizes. Must match circuits/batch_app.
     global MAX_BATCH_SIZE: u32 = 8;
-    global BATCH_OUTPUT_FIELDS: u32 = 8;
+    global BATCH_OUTPUT_FIELDS: u32 = 9;
     global BATCH_NULLIFIERS_COUNT: u32 = 16;  // MAX_BATCH_SIZE * 2
     global BATCH_NOTE_HASHES_COUNT: u32 = 16; // MAX_BATCH_SIZE * 2
+    global BATCH_LOGS_FLAT_COUNT: u32 = 256;  // MAX_BATCH_SIZE * (2 outputs * 16 fields)
 
-    // Merged-batch sizes for pair_wrapper aggregated proofs (2 sub-batches).
+    // Merged-batch sizes for pair_tube aggregated proofs (2 sub-batches).
     global MERGED_BATCH_SIZE: u32 = 16;
     global MERGED_BATCH_NULLIFIERS_COUNT: u32 = 32;
     global MERGED_BATCH_NOTE_HASHES_COUNT: u32 = 32;
+    global MERGED_BATCH_LOGS_FLAT_COUNT: u32 = 512;
+
+    // private_logs_hash position inside BatchOutput (index 6 in serialize()).
+    global PRIVATE_LOGS_HASH_PI_INDEX: u32 = 6;
 
     // -----------------------------------------------------------------------
     // Storage
@@ -127,6 +132,7 @@ pub contract L3IvcSettlement {
         note_hashes: [Field; BATCH_NOTE_HASHES_COUNT],
         deposit_nullifiers: [Field; MAX_BATCH_SIZE],
         withdrawal_claims: [Field; MAX_BATCH_SIZE],
+        private_logs: [Field; BATCH_LOGS_FLAT_COUNT],
     ) {
         // Bind the VK to the contract's committed tube_vk_hash so proofs from
         // other circuits (or mismatched VKs) are rejected even if they pass
@@ -136,6 +142,12 @@ pub contract L3IvcSettlement {
             "submit_batch: tube_vk_hash does not match contract's committed hash",
         );
         verify_honk_proof(tube_vk, tube_proof, public_inputs, tube_vk_hash);
+
+        // Bind caller-supplied private_logs array to the proof's committed hash.
+        assert(
+            poseidon2_hash(private_logs) == public_inputs[PRIVATE_LOGS_HASH_PI_INDEX],
+            "submit_batch: private logs hash mismatch",
+        );
 
         // Count non-zero entries for tree index advancement.
         let mut null_count: Field = 0;
@@ -159,6 +171,7 @@ pub contract L3IvcSettlement {
             nh_count,
             nullifiers,
             note_hashes,
+            private_logs,
         );
     }
 
@@ -184,6 +197,7 @@ pub contract L3IvcSettlement {
         note_hashes_1: [Field; BATCH_NOTE_HASHES_COUNT],
         deposit_nullifiers_1: [Field; MAX_BATCH_SIZE],
         withdrawal_claims_1: [Field; MAX_BATCH_SIZE],
+        private_logs_1: [Field; BATCH_LOGS_FLAT_COUNT],
         // Batch 2
         tube_proof_2: UltraHonkZKProof,
         public_inputs_2: [Field; BATCH_OUTPUT_FIELDS],
@@ -191,6 +205,7 @@ pub contract L3IvcSettlement {
         note_hashes_2: [Field; BATCH_NOTE_HASHES_COUNT],
         deposit_nullifiers_2: [Field; MAX_BATCH_SIZE],
         withdrawal_claims_2: [Field; MAX_BATCH_SIZE],
+        private_logs_2: [Field; BATCH_LOGS_FLAT_COUNT],
     ) {
         // Bind the VK to the contract's committed tube_vk_hash (one storage
         // check covers both batches since they share the VK).
@@ -202,6 +217,16 @@ pub contract L3IvcSettlement {
         // 1. Verify both tube proofs against the shared VK.
         verify_honk_proof(tube_vk, tube_proof_1, public_inputs_1, tube_vk_hash);
         verify_honk_proof(tube_vk, tube_proof_2, public_inputs_2, tube_vk_hash);
+
+        // Bind each batch's logs to its committed hash.
+        assert(
+            poseidon2_hash(private_logs_1) == public_inputs_1[PRIVATE_LOGS_HASH_PI_INDEX],
+            "submit_two_batches: private logs 1 hash mismatch",
+        );
+        assert(
+            poseidon2_hash(private_logs_2) == public_inputs_2[PRIVATE_LOGS_HASH_PI_INDEX],
+            "submit_two_batches: private logs 2 hash mismatch",
+        );
 
         // 2. Count non-zero entries per batch.
         let mut null_count_1: Field = 0;
@@ -229,13 +254,14 @@ pub contract L3IvcSettlement {
             "meta: state root chain broken between batches",
         );
 
-        // 4. Tree-index chain continuity.
+        // 4. Tree-index chain continuity. Tree-index fields shifted to [7]/[8]
+        //    after private_logs_hash was inserted at [6].
         assert(
-            public_inputs_2[6] == public_inputs_1[6] + null_count_1,
+            public_inputs_2[7] == public_inputs_1[7] + null_count_1,
             "meta: nullifier tree index chain broken",
         );
         assert(
-            public_inputs_2[7] == public_inputs_1[7] + nh_count_1,
+            public_inputs_2[8] == public_inputs_1[8] + nh_count_1,
             "meta: note-hash tree index chain broken",
         );
 
@@ -245,12 +271,14 @@ pub contract L3IvcSettlement {
             deposit_nullifiers_1, withdrawal_claims_1,
             null_count_1, nh_count_1,
             nullifiers_1, note_hashes_1,
+            private_logs_1,
         );
         self.enqueue_self.settle_batch(
             public_inputs_2[0], public_inputs_2[1],
             deposit_nullifiers_2, withdrawal_claims_2,
             null_count_2, nh_count_2,
             nullifiers_2, note_hashes_2,
+            private_logs_2,
         );
     }
 
@@ -281,13 +309,20 @@ pub contract L3IvcSettlement {
         note_hashes: [Field; MERGED_BATCH_NOTE_HASHES_COUNT],
         deposit_nullifiers: [Field; MERGED_BATCH_SIZE],
         withdrawal_claims: [Field; MERGED_BATCH_SIZE],
+        private_logs: [Field; MERGED_BATCH_LOGS_FLAT_COUNT],
     ) {
-        // Bind the VK to the contract's committed pair_wrapper vk hash.
+        // Bind the VK to the contract's committed pair_tube vk hash.
         assert(
             merged_vk_hash == self.storage.merged_vk_hash.read(),
             "submit_merged_batch: merged_vk_hash does not match contract's committed hash",
         );
         verify_honk_proof(merged_vk, merged_proof, public_inputs, merged_vk_hash);
+
+        // Bind caller-supplied private_logs array to the proof's committed hash.
+        assert(
+            poseidon2_hash(private_logs) == public_inputs[PRIVATE_LOGS_HASH_PI_INDEX],
+            "submit_merged_batch: private logs hash mismatch",
+        );
 
         // Count non-zero entries for tree index advancement.
         let mut null_count: Field = 0;
@@ -308,6 +343,7 @@ pub contract L3IvcSettlement {
             nh_count,
             nullifiers,
             note_hashes,
+            private_logs,
         );
     }
 
@@ -326,7 +362,9 @@ pub contract L3IvcSettlement {
         nh_count: Field,
         nullifiers: [Field; BATCH_NULLIFIERS_COUNT],
         note_hashes: [Field; BATCH_NOTE_HASHES_COUNT],
+        private_logs: [Field; BATCH_LOGS_FLAT_COUNT],
     ) {
+        let _ = private_logs;  // DA-only -- indexers read from calldata.
         // 1. State chain -- prevents stale/duplicate batch application.
         assert(
             self.storage.latest_root.read() == old_state_root,
@@ -381,7 +419,9 @@ pub contract L3IvcSettlement {
         nh_count: Field,
         nullifiers: [Field; MERGED_BATCH_NULLIFIERS_COUNT],
         note_hashes: [Field; MERGED_BATCH_NOTE_HASHES_COUNT],
+        private_logs: [Field; MERGED_BATCH_LOGS_FLAT_COUNT],
     ) {
+        let _ = private_logs;  // DA-only -- indexers read from calldata.
         // 1. State chain check.
         assert(
             self.storage.latest_root.read() == old_state_root,

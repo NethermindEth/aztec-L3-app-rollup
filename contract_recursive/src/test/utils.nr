@@ -14,16 +14,19 @@ pub global INITIAL_SUPPLY: u128 = 1_000_000;
 pub global MAX_BATCH_SIZE: u32 = 8;
 pub global BATCH_NULLIFIERS_COUNT: u32 = 16;
 pub global BATCH_NOTE_HASHES_COUNT: u32 = 16;
+pub global BATCH_LOGS_FLAT_COUNT: u32 = 256;
 
 // 16-slot aggregated batch (wrapper_16 path).
 pub global BATCH_16_SIZE: u32 = 16;
 pub global BATCH_16_NULLIFIERS_COUNT: u32 = 32;
 pub global BATCH_16_NOTE_HASHES_COUNT: u32 = 32;
+pub global BATCH_16_LOGS_FLAT_COUNT: u32 = 512;
 
 // 64-slot aggregated batch (wrapper_64 path).
 pub global BATCH_64_SIZE: u32 = 64;
 pub global BATCH_64_NULLIFIERS_COUNT: u32 = 128;
 pub global BATCH_64_NOTE_HASHES_COUNT: u32 = 128;
+pub global BATCH_64_LOGS_FLAT_COUNT: u32 = 2048;
 
 // -----------------------------------------------------------------------
 // TestL3 -- wraps contract interaction for clean multi-step tests.
@@ -113,6 +116,7 @@ impl TestL3 {
             if note_hashes[i] != 0 { nh_count += 1; }
         }
 
+        let zero_logs: [Field; BATCH_LOGS_FLAT_COUNT] = [0; BATCH_LOGS_FLAT_COUNT];
         self.env.call_public(
             self.l3,
             L3RecursiveSettlement::at(self.l3).settle_batch(
@@ -124,6 +128,7 @@ impl TestL3 {
                 nh_count,
                 nullifiers,
                 note_hashes,
+                zero_logs,
             ),
         );
 
@@ -150,6 +155,7 @@ impl TestL3 {
             if note_hashes[i] != 0 { nh_count += 1; }
         }
 
+        let zero_logs: [Field; BATCH_16_LOGS_FLAT_COUNT] = [0; BATCH_16_LOGS_FLAT_COUNT];
         self.env.call_public(
             self.l3,
             L3RecursiveSettlement::at(self.l3).settle_batch_16(
@@ -161,6 +167,7 @@ impl TestL3 {
                 nh_count,
                 nullifiers,
                 note_hashes,
+                zero_logs,
             ),
         );
 
@@ -187,6 +194,7 @@ impl TestL3 {
             if note_hashes[i] != 0 { nh_count += 1; }
         }
 
+        let zero_logs: [Field; BATCH_64_LOGS_FLAT_COUNT] = [0; BATCH_64_LOGS_FLAT_COUNT];
         self.env.call_public(
             self.l3,
             L3RecursiveSettlement::at(self.l3).settle_batch_64(
@@ -198,6 +206,7 @@ impl TestL3 {
                 nh_count,
                 nullifiers,
                 note_hashes,
+                zero_logs,
             ),
         );
 

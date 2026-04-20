@@ -5,10 +5,11 @@
 // constraints that require MegaCircuitBuilder, allowing the circuit to be
 // proved as a standalone UltraHonk proof.
 //
-// The 8 public outputs match BatchOutput's fields in order.
+// The 9 public outputs match BatchOutput's fields in order.
 
 use l3_types::{
     TREE_DEPTH, MAX_NOTES_PER_TX, MAX_OUTPUTS_PER_TX, TX_PUBLIC_INPUT_COUNT,
+    TX_LOG_PAYLOAD_LEN, TX_LOGS_COMMIT_INDEX,
     IndexedLeaf, poseidon2_hash,
     compute_state_root, compute_merkle_root,
 };
@@ -22,6 +23,7 @@ use bb_proof_verification::{verify_honk_proof, UltraHonkVerificationKey, UltraHo
 global MAX_BATCH_SIZE: u32 = 8;
 global BATCH_NULLIFIERS_COUNT: u32 = 16; // MAX_BATCH_SIZE * MAX_NOTES_PER_TX
 global BATCH_NOTE_HASHES_COUNT: u32 = 16; // MAX_BATCH_SIZE * MAX_OUTPUTS_PER_TX
+global BATCH_LOGS_FLAT_LEN: u32 = 256;    // MAX_BATCH_SIZE * TX_LOG_PAYLOAD_LEN
 
 fn main(
     // --- private inputs ---
@@ -61,6 +63,9 @@ fn main(
     // -- Append-only note hash tree insertion witnesses --
     note_hash_insertion_siblings: [[Field; TREE_DEPTH]; BATCH_NOTE_HASHES_COUNT],
 
+    // -- Per-tx encrypted log payloads (witness) --
+    private_logs: [[Field; TX_LOG_PAYLOAD_LEN]; MAX_BATCH_SIZE],
+
     // --- public inputs (explicit, no databus) ---
     old_state_root: pub Field,
     new_state_root: pub Field,
@@ -68,6 +73,7 @@ fn main(
     note_hashes_batch_hash: pub Field,
     deposit_nullifiers_hash: pub Field,
     withdrawal_claims_hash: pub Field,
+    private_logs_hash: pub Field,
     nullifier_tree_start_index: pub Field,
     note_hash_tree_start_index: pub Field,
 ) {
@@ -240,6 +246,12 @@ fn main(
         if is_withdraw {
             withdrawal_claims_arr[i] = tx_public_inputs[i][MAX_NOTES_PER_TX];
         }
+
+        // --- Log aggregation ---
+        assert(
+            poseidon2_hash(private_logs[i]) == tx_public_inputs[i][TX_LOGS_COMMIT_INDEX],
+            "per-tx logs commit mismatch",
+        );
     }
 
     // 3. Final tree roots.
@@ -268,5 +280,17 @@ fn main(
     assert(
         poseidon2_hash(withdrawal_claims_arr) == withdrawal_claims_hash,
         "withdrawal claims hash mismatch",
+    );
+
+    // Flatten all tx log payloads into a single batch-wide array and hash.
+    let mut logs_flat: [Field; BATCH_LOGS_FLAT_LEN] = [0; BATCH_LOGS_FLAT_LEN];
+    for i in 0..MAX_BATCH_SIZE {
+        for j in 0..TX_LOG_PAYLOAD_LEN {
+            logs_flat[i * TX_LOG_PAYLOAD_LEN + j] = private_logs[i][j];
+        }
+    }
+    assert(
+        poseidon2_hash(logs_flat) == private_logs_hash,
+        "private logs batch hash mismatch",
     );
 }

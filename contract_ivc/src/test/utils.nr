@@ -14,6 +14,7 @@ pub global INITIAL_SUPPLY: u128 = 1_000_000;
 pub global MAX_BATCH_SIZE: u32 = 8;
 pub global BATCH_NULLIFIERS_COUNT: u32 = 16;
 pub global BATCH_NOTE_HASHES_COUNT: u32 = 16;
+pub global BATCH_LOGS_FLAT_COUNT: u32 = 256;
 
 // -----------------------------------------------------------------------
 // TestL3 -- wraps contract interaction for clean multi-step tests.
@@ -99,6 +100,7 @@ impl TestL3 {
             if note_hashes[i] != 0 { nh_count += 1; }
         }
 
+        let zero_logs: [Field; BATCH_LOGS_FLAT_COUNT] = [0; BATCH_LOGS_FLAT_COUNT];
         self.env.call_public(
             self.l3,
             L3IvcSettlement::at(self.l3).settle_batch(
@@ -110,6 +112,7 @@ impl TestL3 {
                 nh_count,
                 nullifiers,
                 note_hashes,
+                zero_logs,
             ),
         );
 

@@ -22,26 +22,34 @@ The 64-slot path is exercised by `step11-recursive-64slot.ts` and bb-verified en
 
 ## Public-input widening
 
-Each aggregator level publishes the VK hash of the level below, so the `submit_batch_*` asserts can bind the whole chain. This adds one public-input field per level:
+Each aggregator level publishes the VK hash of the level below, so the `submit_batch_*` asserts can bind the whole chain. This adds one public-input field per level. The 9-field `BatchOutput` (Phase 2, incl. `private_logs_hash`) is the common prefix:
 
 | Level | Public inputs | Added |
 |---|---|---|
-| `wrapper` (8) | 8 | — |
-| `wrapper_16` | 9 | `wrapper_vk_hash` |
-| `wrapper_32` | 10 | + `w16_vk_hash` |
-| `wrapper_64` | 11 | + `w32_vk_hash` |
+| `wrapper` (8) | 9 | — (full BatchOutput) |
+| `wrapper_16` | 10 | `wrapper_vk_hash` |
+| `wrapper_32` | 11 | + `w16_vk_hash` |
+| `wrapper_64` | 12 | + `w32_vk_hash` |
 
 Immutable contract storage holds `tube_vk_hash`, `vk_hash_16`, `vk_hash_32`, `vk_hash_64`; `submit_batch_16` / `submit_batch_64` assert each inner hash against the corresponding storage slot. The hardening closes the inner-VK substitution attack class conditional on the proof gate being enforced; the asserts themselves fire under sandbox/TXE since they are plain Noir asserts.
 
-## DA per level (Path B, batch=16→64)
+## L1 DA per settlement
 
-| Level | Settle arrays (fields) | VK + 1 + proof + PI | Total fields | Total bytes |
-|---|---|---|---|---|
-| 16 | 96 | 115 + 1 + 500 + 8 = 624 | 720 | 23,040 |
-| 32 | 192 | 115 + 1 + 500 + 10 = 626 | 818 | 26,176 |
-| 64 | 384 | 115 + 1 + 500 + 11 = 627 | 1,011 | 32,352 |
+`submit_batch_*` is `#[external("private")]`; its `tube_vk` (115 fields), `tube_proof` (500 fields), `tube_vk_hash` (1 field), and the non-forwarded entries of `public_inputs` are **private** witnesses consumed by `verify_honk_proof` inside Aztec's kernel and never posted to L1. What hits L1 DA per settlement is the enqueued public `settle_batch_*` call's arguments. The table below counts only those.
 
-Settle-array growth dominates at higher levels; proof/VK stay fixed because UltraHonk proof size is independent of inner circuit size.
+Only 8/16/64 slot sizes are real L1 settle endpoints (`submit_batch`, `submit_batch_16` / `submit_merged_batch`, `submit_batch_64`). `wrapper_32` is an intermediate aggregator with no direct settle target.
+
+| Endpoint | state roots | side-effect arrays (deposits + withdrawals) | insertion counts | nullifiers + note_hashes | private_logs | **Total fields** | **Bytes** |
+|---|---|---|---|---|---|---|---|
+| 8-slot | 2 | 8 + 8 = 16 | 2 | 16 + 16 = 32 | 256 | **308** | 9,856 |
+| 16-slot | 2 | 16 + 16 = 32 | 2 | 32 + 32 = 64 | 512 | **612** | 19,584 |
+| 64-slot | 2 | 64 + 64 = 128 | 2 | 128 + 128 = 256 | 2,048 | **2,436** | 77,952 |
+
+`private_logs` dominates DA at every level (~83 %+ of the total). The flat `[tag, ct_0..ct_14]` layout per output (16 fields each, 2 outputs per tx, batch-sized) is the Aztec-format encrypted-note-log payload that the recipient wallet decrypts (see `tests/messages/`).
+
+The settle-level `deposit_nullifiers` + `withdrawal_claims` pair could be collapsed into one `[Field; MAX_BATCH_SIZE]` array plus two section counts, saving MAX_BATCH_SIZE − 2 fields per settlement (62 fields / ~2 KB at 64-slot). Not pursued: the savings are negligible next to the log budget, and the two-array split matches `batch_app`'s internal section routing.
+
+Proof size and VK size stay constant end-to-end because UltraHonk is independent of inner circuit size, but the cost lives in the prover and the L2 kernel proof — not in L1 DA.
 
 ## Proving cost shape
 

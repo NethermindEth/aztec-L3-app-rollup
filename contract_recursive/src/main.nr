@@ -22,29 +22,35 @@ pub contract L3RecursiveSettlement {
     // the field name `tube_vk_hash` is kept for parity with the IVC storage layout
     // so indexers can share generic decoders.
     global MAX_BATCH_SIZE: u32 = 8;
-    global BATCH_OUTPUT_FIELDS: u32 = 8;
+    global BATCH_OUTPUT_FIELDS: u32 = 9;
     global BATCH_NULLIFIERS_COUNT: u32 = 16;  // MAX_BATCH_SIZE * 2
     global BATCH_NOTE_HASHES_COUNT: u32 = 16; // MAX_BATCH_SIZE * 2
+    global BATCH_LOGS_FLAT_COUNT: u32 = 256;  // MAX_BATCH_SIZE * (2 outputs * 16 fields)
 
     // 16-slot aggregated batch (wrapper_16 proof = pair-merge of 2 wrappers).
     // Accepted on-chain via submit_batch_16.
-    // Public-inputs: 8 BatchOutput fields + 1 inner wrapper_vk_hash binding
+    // Public-inputs: 9 BatchOutput fields + 1 inner wrapper_vk_hash binding
     // that the contract asserts against its committed tube_vk_hash.
     global BATCH_16_SIZE: u32 = 16;
     global BATCH_16_NULLIFIERS_COUNT: u32 = 32;
     global BATCH_16_NOTE_HASHES_COUNT: u32 = 32;
-    global PUB_COUNT_16: u32 = 9;
+    global BATCH_16_LOGS_FLAT_COUNT: u32 = 512;
+    global PUB_COUNT_16: u32 = 10;
 
     // 64-slot aggregated batch (wrapper_64 proof = 3-level binary tree:
     // wrapper x8 -> wrapper_16 x4 -> wrapper_32 x2 -> wrapper_64 x1).
     // Accepted on-chain via submit_batch_64.
-    // Public-inputs: 8 BatchOutput fields + 3 inner VK-hash bindings
+    // Public-inputs: 9 BatchOutput fields + 3 inner VK-hash bindings
     // (wrapper / wrapper_16 / wrapper_32), each asserted against the matching
     // committed hash.
     global BATCH_64_SIZE: u32 = 64;
     global BATCH_64_NULLIFIERS_COUNT: u32 = 128;
     global BATCH_64_NOTE_HASHES_COUNT: u32 = 128;
-    global PUB_COUNT_64: u32 = 11;
+    global BATCH_64_LOGS_FLAT_COUNT: u32 = 2048;
+    global PUB_COUNT_64: u32 = 12;
+
+    // private_logs_hash position inside BatchOutput (index 6 in serialize()).
+    global PRIVATE_LOGS_HASH_PI_INDEX: u32 = 6;
 
     // -----------------------------------------------------------------------
     // Storage
@@ -163,12 +169,19 @@ pub contract L3RecursiveSettlement {
         note_hashes: [Field; BATCH_NOTE_HASHES_COUNT],
         deposit_nullifiers: [Field; MAX_BATCH_SIZE],
         withdrawal_claims: [Field; MAX_BATCH_SIZE],
+        private_logs: [Field; BATCH_LOGS_FLAT_COUNT],
     ) {
         assert(
             tube_vk_hash == self.storage.tube_vk_hash.read(),
             "submit_batch: wrapper vk_hash does not match contract's committed hash",
         );
         verify_honk_proof(tube_vk, tube_proof, public_inputs, tube_vk_hash);
+
+        // Bind the caller-supplied private_logs array to the proof's committed hash.
+        assert(
+            poseidon2_hash(private_logs) == public_inputs[PRIVATE_LOGS_HASH_PI_INDEX],
+            "submit_batch: private logs hash mismatch",
+        );
 
         // Count non-zero entries for tree index advancement.
         let mut null_count: Field = 0;
@@ -189,6 +202,7 @@ pub contract L3RecursiveSettlement {
             nh_count,
             nullifiers,
             note_hashes,
+            private_logs,
         );
     }
 
@@ -207,7 +221,9 @@ pub contract L3RecursiveSettlement {
         nh_count: Field,
         nullifiers: [Field; BATCH_NULLIFIERS_COUNT],
         note_hashes: [Field; BATCH_NOTE_HASHES_COUNT],
+        private_logs: [Field; BATCH_LOGS_FLAT_COUNT],
     ) {
+        let _ = private_logs;  // DA-only -- indexers read from calldata.
         // 1. State chain -- prevents stale/duplicate batch application.
         assert(
             self.storage.latest_root.read() == old_state_root,
@@ -243,8 +259,12 @@ pub contract L3RecursiveSettlement {
         );
 
         // All batch data (nullifiers, note_hashes, deposit_nullifiers,
-        // withdrawal_claims) is DA-available via the public function arguments.
-        // No logs emitted -- L3 indexers decode directly from calldata.
+        // withdrawal_claims, private_logs) is DA-available via the public
+        // function arguments. No logs emitted -- L3 indexers decode directly
+        // from calldata. The private_logs array is PRIVATE_LOG_SIZE_IN_FIELDS
+        // (16) fields per encrypted note log (ONCHAIN_UNCONSTRAINED wallet-
+        // produced, Aztec-format), laid out as
+        //   [tx_0 output_0 log, tx_0 output_1 log, tx_1 output_0 log, ...].
     }
 
     // -----------------------------------------------------------------------
@@ -269,6 +289,7 @@ pub contract L3RecursiveSettlement {
         note_hashes: [Field; BATCH_16_NOTE_HASHES_COUNT],
         deposit_nullifiers: [Field; BATCH_16_SIZE],
         withdrawal_claims: [Field; BATCH_16_SIZE],
+        private_logs: [Field; BATCH_16_LOGS_FLAT_COUNT],
     ) {
         // 1. Bind the outer (wrapper_16) VK to the contract's committed hash.
         assert(
@@ -276,12 +297,18 @@ pub contract L3RecursiveSettlement {
             "submit_batch_16: vk_hash_16 does not match contract's committed hash",
         );
         // 2. Bind the INNER wrapper VK as published by wrapper_16 at
-        //    public_inputs[8]. Closes the inner-VK substitution gap.
+        //    public_inputs[9]. Closes the inner-VK substitution gap.
         assert(
-            public_inputs[8] == self.storage.tube_vk_hash.read(),
+            public_inputs[9] == self.storage.tube_vk_hash.read(),
             "submit_batch_16: inner wrapper_vk_hash does not match committed tube_vk_hash",
         );
         verify_honk_proof(vk_16, proof_16, public_inputs, vk_hash_16);
+
+        // Bind the caller-supplied private_logs array to the proof's committed hash.
+        assert(
+            poseidon2_hash(private_logs) == public_inputs[PRIVATE_LOGS_HASH_PI_INDEX],
+            "submit_batch_16: private logs hash mismatch",
+        );
 
         let mut null_count: Field = 0;
         for i in 0..BATCH_16_NULLIFIERS_COUNT {
@@ -301,6 +328,7 @@ pub contract L3RecursiveSettlement {
             nh_count,
             nullifiers,
             note_hashes,
+            private_logs,
         );
     }
 
@@ -319,7 +347,9 @@ pub contract L3RecursiveSettlement {
         nh_count: Field,
         nullifiers: [Field; BATCH_16_NULLIFIERS_COUNT],
         note_hashes: [Field; BATCH_16_NOTE_HASHES_COUNT],
+        private_logs: [Field; BATCH_16_LOGS_FLAT_COUNT],
     ) {
+        let _ = private_logs;  // DA-only -- indexers read from calldata.
         assert(
             self.storage.latest_root.read() == old_state_root,
             "old state root mismatch",
@@ -379,25 +409,36 @@ pub contract L3RecursiveSettlement {
         note_hashes: [Field; BATCH_64_NOTE_HASHES_COUNT],
         deposit_nullifiers: [Field; BATCH_64_SIZE],
         withdrawal_claims: [Field; BATCH_64_SIZE],
+        private_logs: [Field; BATCH_64_LOGS_FLAT_COUNT],
     ) {
-        // Full VK chain binding.
+        // Full VK chain binding. PI layout after adding private_logs_hash at [6]:
+        //   [0..8]  BatchOutput (9 fields)
+        //   [9]     wrapper_vk_hash  (== tube_vk_hash storage)
+        //   [10]    vk_hash_16
+        //   [11]    vk_hash_32
         assert(
             vk_hash_64 == self.storage.vk_hash_64.read(),
             "submit_batch_64: vk_hash_64 does not match contract's committed hash",
         );
         assert(
-            public_inputs[8] == self.storage.tube_vk_hash.read(),
+            public_inputs[9] == self.storage.tube_vk_hash.read(),
             "submit_batch_64: inner wrapper_vk_hash does not match committed tube_vk_hash",
         );
         assert(
-            public_inputs[9] == self.storage.vk_hash_16.read(),
+            public_inputs[10] == self.storage.vk_hash_16.read(),
             "submit_batch_64: inner vk_hash_16 does not match committed vk_hash_16",
         );
         assert(
-            public_inputs[10] == self.storage.vk_hash_32.read(),
+            public_inputs[11] == self.storage.vk_hash_32.read(),
             "submit_batch_64: inner vk_hash_32 does not match committed vk_hash_32",
         );
         verify_honk_proof(vk_64, proof_64, public_inputs, vk_hash_64);
+
+        // Bind the caller-supplied private_logs array to the proof's committed hash.
+        assert(
+            poseidon2_hash(private_logs) == public_inputs[PRIVATE_LOGS_HASH_PI_INDEX],
+            "submit_batch_64: private logs hash mismatch",
+        );
 
         let mut null_count: Field = 0;
         for i in 0..BATCH_64_NULLIFIERS_COUNT {
@@ -417,6 +458,7 @@ pub contract L3RecursiveSettlement {
             nh_count,
             nullifiers,
             note_hashes,
+            private_logs,
         );
     }
 
@@ -435,7 +477,9 @@ pub contract L3RecursiveSettlement {
         nh_count: Field,
         nullifiers: [Field; BATCH_64_NULLIFIERS_COUNT],
         note_hashes: [Field; BATCH_64_NOTE_HASHES_COUNT],
+        private_logs: [Field; BATCH_64_LOGS_FLAT_COUNT],
     ) {
+        let _ = private_logs;  // DA-only -- indexers read from calldata.
         assert(
             self.storage.latest_root.read() == old_state_root,
             "old state root mismatch",

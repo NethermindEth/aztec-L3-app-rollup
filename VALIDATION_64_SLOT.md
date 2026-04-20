@@ -34,22 +34,24 @@ Per level (4 levels × 7 cases): positive baseline + proof / public_inputs / VK 
 
 | Deployed with wrong | Asserted against | Result |
 |---|---|---|
-| `tube_vk_hash` | `public_inputs[8]` (wrapper_vk_hash) | rejected |
-| `vk_hash_16` | `public_inputs[9]` (w16_vk_hash) | rejected |
-| `vk_hash_32` | `public_inputs[10]` (w32_vk_hash) | rejected |
+| `tube_vk_hash` | `public_inputs[9]` (wrapper_vk_hash) | rejected |
+| `vk_hash_16` | `public_inputs[10]` (w16_vk_hash) | rejected |
+| `vk_hash_32` | `public_inputs[11]` (w32_vk_hash) | rejected |
 
 **Result**: `PASS=3 FAIL=0`. Each chain-binding assert fires when its committed hash is wrong. These are plain Noir asserts, not `verify_honk_proof` calls, so they fire under sandbox/TXE where the proof gate is a no-op (see `SILENT_FAILURE_REVIEW.md` Problem 1).
 
 ## Public-input shapes
 
+Post-Phase 2 (note-discovery, `private_logs_hash` added to `BatchOutput`):
+
 | Artifact | Size | Fields | Chain-binding fields |
 |---|---|---|---|
-| `wrapper_public_inputs.bin` | 256 B | 8 | — |
-| `wrapper_16_public_inputs.bin` | 288 B | 9 | wrapper_vk_hash |
-| `wrapper_32_public_inputs.bin` | 320 B | 10 | + w16_vk_hash |
-| `wrapper_64_public_inputs.bin` | 352 B | 11 | + w32_vk_hash |
+| `wrapper_public_inputs.bin` | 288 B | 9 | — (full BatchOutput) |
+| `wrapper_16_public_inputs.bin` | 320 B | 10 | wrapper_vk_hash |
+| `wrapper_32_public_inputs.bin` | 352 B | 11 | + w16_vk_hash |
+| `wrapper_64_public_inputs.bin` | 384 B | 12 | + w32_vk_hash |
 
-bb CLI accepts each width when paired with its matching VK; rejects mismatched pairings.
+bb CLI accepts each width when paired with its matching VK; rejects mismatched pairings. Artifacts regenerate via `INCLUDE_64=1 npm run verify:recursive:64`; this chain has not been re-run since the Phase 2 circuit changes, so on-disk artifacts under `tests/bb-verify-artifacts/` may still carry the pre-Phase-2 widths (8 / 9 / 10 / 11) until a new prove pass.
 
 ## Memory profile
 

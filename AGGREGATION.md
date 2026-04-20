@@ -42,21 +42,20 @@ sub-batch 2 -> IVC -> tube proof 2 (519-field RollupHonk)  --+
 
 ## On-wire shapes (identical for B and C)
 
-Both B and C produce the same submission shape at batch=16:
+Both B and C produce the same submission shape at batch=16. `submit_batch_16` / `submit_merged_batch` is `#[external("private")]`, so its `tube_vk` (115 fields), `tube_proof` (500 fields), `tube_vk_hash` (1 field), and the non-forwarded entries of `public_inputs` are witness to the Aztec kernel and never reach L1 DA. What hits L1 DA is the enqueued public `settle_batch_16` / `settle_batch_merged` call's arguments:
 
 | Item | Fields | Bytes |
 |---|---|---|
-| VK | 115 | 3,680 |
-| VK hash (enqueued to settle) | 1 | 32 |
-| Proof | 500 | 16,000 |
-| Public inputs | 8 | 256 |
+| State roots (old + new) | 2 | 64 |
 | Merged nullifiers | 32 | 1,024 |
 | Merged note hashes | 32 | 1,024 |
 | Merged deposit nullifiers | 16 | 512 |
 | Merged withdrawal claims | 16 | 512 |
-| **Total DA** | **720** | **23,040** |
+| Insertion counts (null + nh) | 2 | 64 |
+| Merged private logs (note-discovery) | 512 | 16,384 |
+| **Total L1 DA** | **612** | **19,584** |
 
-One `settle_batch_{16,merged}` public call, nonce += 1.
+One `settle_batch_{16,merged}` public call, nonce += 1. Proof size (16,000 B) and VK size (3,680 B) still matter for kernel proving cost but do not consume L1 DA. Encrypted note logs introduced in Phase 2 (see `DESIGN_DECISIONS.md` §2 extension + `tests/messages/`) dominate the L1 footprint at ~84 %.
 
 ---
 
@@ -70,7 +69,7 @@ One `settle_batch_{16,merged}` public call, nonce += 1.
 | Aggregator proving | ~2.4 min | ~37 min **swap-bound** |
 | Total proving wall-clock | ~24 min | ~39 min |
 | L2 submit | ~9 s | ~7 s |
-| DA / proof size | 23,040 B / 16,000 B | 23,040 B / 16,000 B |
+| L1 DA / proof size (kernel witness) | 19,584 B / 16,000 B | 19,584 B / 16,000 B |
 
 **Where each path pays.** Path B's leaves don't fit in 16 GiB (each `wrapper` prove peaks ~8 GiB), so they run sequentially on a 16 GiB host. Path C's leaves are cheap (IVC folding) and concurrent, but the `pair_tube` aggregator does cross-curve IPA finalization (Grumpkin ops simulated in BN254 non-native field arithmetic) and pushes past 16 GiB, so proving runs in swap.
 

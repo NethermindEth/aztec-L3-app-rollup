@@ -1,5 +1,7 @@
 use std::embedded_curve_ops::{EmbeddedCurvePoint, EmbeddedCurveScalar, fixed_base_scalar_mul};
 
+pub mod messages;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -21,10 +23,16 @@ pub global TREE_DEPTH: u32 = 20;
 // These are per-transaction and identical across pipelines.
 pub global MAX_NOTES_PER_TX: u32 = 2;
 pub global MAX_OUTPUTS_PER_TX: u32 = 2;
-pub global TX_PUBLIC_INPUT_COUNT: u32 = 5; // 2 nullifiers + 2 note hashes + state_root
+// 2 nullifiers + 2 note hashes + state_root + logs_commit
+// logs_commit = poseidon2_hash of flattened MAX_OUTPUTS_PER_TX * PRIVATE_LOG_SIZE_IN_FIELDS log fields.
+pub global TX_PUBLIC_INPUT_COUNT: u32 = 6;
+pub global TX_LOGS_COMMIT_INDEX: u32 = 5;
+
+// Per-tx flat log payload: MAX_OUTPUTS_PER_TX outputs * 16 fields each = 32 fields.
+pub global TX_LOG_PAYLOAD_LEN: u32 = MAX_OUTPUTS_PER_TX * messages::constants::PRIVATE_LOG_SIZE_IN_FIELDS;
 
 // Size of the BatchOutput struct in fields. Identical for IVC and Recursive pipelines.
-pub global BATCH_OUTPUT_FIELDS: u32 = 8;
+pub global BATCH_OUTPUT_FIELDS: u32 = 9;
 
 // NOTE: MAX_BATCH_SIZE, BATCH_NULLIFIERS_COUNT, and BATCH_NOTE_HASHES_COUNT are NOT
 // defined here. They differ per pipeline and are owned by each batch-aggregation
@@ -62,6 +70,7 @@ pub struct BatchOutput {
     pub note_hashes_root: Field,
     pub deposit_nullifiers_hash: Field,
     pub withdrawal_claims_hash: Field,
+    pub private_logs_hash: Field,
     pub nullifier_tree_start_index: Field,
     pub note_hash_tree_start_index: Field,
 }
@@ -75,6 +84,7 @@ impl BatchOutput {
             self.note_hashes_root,
             self.deposit_nullifiers_hash,
             self.withdrawal_claims_hash,
+            self.private_logs_hash,
             self.nullifier_tree_start_index,
             self.note_hash_tree_start_index,
         ]
