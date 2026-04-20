@@ -140,7 +140,7 @@ async function main() {
     const initialRoot = state.stateRoot.toBigInt();
     const { contract: l3 } = await Contract.deploy(
       wallet, l3Artifact,
-      [initialRoot, c.deployHashes[0], c.deployHashes[1], c.deployHashes[2], c.deployHashes[3]],
+      [initialRoot, c.deployHashes[0], c.deployHashes[1], c.deployHashes[2], c.deployHashes[3], 0n],
       "constructor",
     ).send({ from: admin });
 
@@ -159,6 +159,7 @@ async function main() {
           payload.mergedNoteHashes,
           payload.mergedDeposits,
           payload.mergedWithdrawals,
+          new Array(2048).fill(0n), // private_logs (64 tx * 2 outputs * 16 fields)
         )
         .send({ from: admin });
       got = "(call succeeded -- expected revert!)";

@@ -66,7 +66,7 @@ async function main() {
     JSON.parse(readFileSync(L3_ARTIFACT, "utf-8")) as NoirCompiledContract,
   );
   try {
-    const { contract: l3 } = await Contract.deploy(wallet, l3Artifact, [0n, 0n, 0n], "constructor")
+    const { contract: l3 } = await Contract.deploy(wallet, l3Artifact, [0n, 0n, 0n, 0n], "constructor")
       .send({ from: admin });
     console.log("   L3:", l3.address.toString());
 

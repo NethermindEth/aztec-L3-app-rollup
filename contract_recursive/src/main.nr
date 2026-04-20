@@ -22,7 +22,7 @@ pub contract L3RecursiveSettlement {
     // the field name `tube_vk_hash` is kept for parity with the IVC storage layout
     // so indexers can share generic decoders.
     global MAX_BATCH_SIZE: u32 = 8;
-    global BATCH_OUTPUT_FIELDS: u32 = 9;
+    global BATCH_OUTPUT_FIELDS: u32 = 10;
     global BATCH_NULLIFIERS_COUNT: u32 = 16;  // MAX_BATCH_SIZE * 2
     global BATCH_NOTE_HASHES_COUNT: u32 = 16; // MAX_BATCH_SIZE * 2
     global BATCH_LOGS_FLAT_COUNT: u32 = 256;  // MAX_BATCH_SIZE * (2 outputs * 16 fields)
@@ -30,27 +30,34 @@ pub contract L3RecursiveSettlement {
     // 16-slot aggregated batch (wrapper_16 proof = pair-merge of 2 wrappers).
     // Accepted on-chain via submit_batch_16.
     // Public-inputs: 9 BatchOutput fields + 1 inner wrapper_vk_hash binding
-    // that the contract asserts against its committed tube_vk_hash.
+    // + 1 per_tx_vk_hashes_commit binding = 11 fields.
     global BATCH_16_SIZE: u32 = 16;
     global BATCH_16_NULLIFIERS_COUNT: u32 = 32;
     global BATCH_16_NOTE_HASHES_COUNT: u32 = 32;
     global BATCH_16_LOGS_FLAT_COUNT: u32 = 512;
-    global PUB_COUNT_16: u32 = 10;
+    global PUB_COUNT_16: u32 = 11;
 
     // 64-slot aggregated batch (wrapper_64 proof = 3-level binary tree:
     // wrapper x8 -> wrapper_16 x4 -> wrapper_32 x2 -> wrapper_64 x1).
     // Accepted on-chain via submit_batch_64.
     // Public-inputs: 9 BatchOutput fields + 3 inner VK-hash bindings
-    // (wrapper / wrapper_16 / wrapper_32), each asserted against the matching
-    // committed hash.
+    // (wrapper / wrapper_16 / wrapper_32) + 1 per_tx_vk_hashes_commit = 13 fields.
     global BATCH_64_SIZE: u32 = 64;
     global BATCH_64_NULLIFIERS_COUNT: u32 = 128;
     global BATCH_64_NOTE_HASHES_COUNT: u32 = 128;
     global BATCH_64_LOGS_FLAT_COUNT: u32 = 2048;
-    global PUB_COUNT_64: u32 = 12;
+    global PUB_COUNT_64: u32 = 13;
 
     // private_logs_hash position inside BatchOutput (index 6 in serialize()).
     global PRIVATE_LOGS_HASH_PI_INDEX: u32 = 6;
+
+    // per_tx_vk_hashes_commit positions in the different aggregator PI shapes.
+    // BatchOutput itself puts it at index 9 (submit_batch / single wrapper).
+    // wrapper_16: [0..8] BatchOutput + [9] wrapper_vk_hash + [10] per_tx_commit.
+    // wrapper_64: [0..8] BatchOutput + [9..11] 3 VK hashes + [12] per_tx_commit.
+    global PER_TX_VK_HASHES_COMMIT_PI_INDEX: u32 = 9;
+    global PER_TX_VK_HASHES_COMMIT_PI_INDEX_16: u32 = 10;
+    global PER_TX_VK_HASHES_COMMIT_PI_INDEX_64: u32 = 12;
 
     // -----------------------------------------------------------------------
     // Storage
@@ -73,6 +80,11 @@ pub contract L3RecursiveSettlement {
         vk_hash_16: PublicImmutable<Field, Context>,
         vk_hash_32: PublicImmutable<Field, Context>,
         vk_hash_64: PublicImmutable<Field, Context>,
+        // per_tx_vk_hashes_commit: poseidon2 over the four canonical per-tx
+        // VK hashes (deposit/payment/withdraw/padding). Every submit_batch_*
+        // path asserts the proof's public-input value matches this, blocking
+        // custom-circuit substitution in any per-tx slot of batch_app_standalone.
+        per_tx_vk_hashes_commit: PublicImmutable<Field, Context>,
         batch_nonce: PublicMutable<Field, Context>,
         nullifier_tree_start_index: PublicMutable<Field, Context>,
         note_hash_tree_start_index: PublicMutable<Field, Context>,
@@ -92,12 +104,14 @@ pub contract L3RecursiveSettlement {
         vk_hash_16: Field,
         vk_hash_32: Field,
         vk_hash_64: Field,
+        per_tx_vk_hashes_commit: Field,
     ) {
         self.storage.latest_root.write(initial_state_root);
         self.storage.tube_vk_hash.initialize(tube_vk_hash);
         self.storage.vk_hash_16.initialize(vk_hash_16);
         self.storage.vk_hash_32.initialize(vk_hash_32);
         self.storage.vk_hash_64.initialize(vk_hash_64);
+        self.storage.per_tx_vk_hashes_commit.initialize(per_tx_vk_hashes_commit);
         self.storage.batch_nonce.write(0);
         // Nullifier tree index 0 is the genesis zero leaf, so insertions start at 1.
         self.storage.nullifier_tree_start_index.write(1);
@@ -181,6 +195,14 @@ pub contract L3RecursiveSettlement {
         assert(
             poseidon2_hash(private_logs) == public_inputs[PRIVATE_LOGS_HASH_PI_INDEX],
             "submit_batch: private logs hash mismatch",
+        );
+
+        // Bind per-tx VK hashes commit: batch_app_standalone emitted this at
+        // PI index 9; wrapper propagated it unchanged. Contract pins it.
+        assert(
+            public_inputs[PER_TX_VK_HASHES_COMMIT_PI_INDEX]
+                == self.storage.per_tx_vk_hashes_commit.read(),
+            "submit_batch: per-tx VK hashes commit does not match contract's committed value",
         );
 
         // Count non-zero entries for tree index advancement.
@@ -308,6 +330,16 @@ pub contract L3RecursiveSettlement {
         assert(
             poseidon2_hash(private_logs) == public_inputs[PRIVATE_LOGS_HASH_PI_INDEX],
             "submit_batch_16: private logs hash mismatch",
+        );
+
+        // Bind per-tx VK hashes commit: every level of the wrapper tree
+        // forwards this value unchanged from batch_app_standalone. Contract
+        // pins it; mismatch means an attacker ran batch_app with non-canonical
+        // per-tx circuits.
+        assert(
+            public_inputs[PER_TX_VK_HASHES_COMMIT_PI_INDEX_16]
+                == self.storage.per_tx_vk_hashes_commit.read(),
+            "submit_batch_16: per-tx VK hashes commit does not match contract's committed value",
         );
 
         let mut null_count: Field = 0;
@@ -438,6 +470,14 @@ pub contract L3RecursiveSettlement {
         assert(
             poseidon2_hash(private_logs) == public_inputs[PRIVATE_LOGS_HASH_PI_INDEX],
             "submit_batch_64: private logs hash mismatch",
+        );
+
+        // Bind per-tx VK hashes commit at PI[12]: wrapper_64 carries the commit
+        // through the full 3-level binary tree. Contract pins it.
+        assert(
+            public_inputs[PER_TX_VK_HASHES_COMMIT_PI_INDEX_64]
+                == self.storage.per_tx_vk_hashes_commit.read(),
+            "submit_batch_64: per-tx VK hashes commit does not match contract's committed value",
         );
 
         let mut null_count: Field = 0;

@@ -25,20 +25,21 @@ async function main() {
   const art = loadContractArtifact(
     JSON.parse(readFileSync(resolve(import.meta.dirname ?? ".", "../target/l3_recursive_settlement-L3RecursiveSettlement.json"), "utf-8")) as NoirCompiledContract,
   );
-  const { contract: l3 } = await Contract.deploy(wallet, art, [0n, 0n, 0n], "constructor")
+  const { contract: l3 } = await Contract.deploy(wallet, art, [0n, 0n, 0n, 0n, 0n, 0n], "constructor")
     .send({ from: admin });
 
   console.log("=== Probe: all-zero 500-field proof against L3RecursiveSettlement ===");
   try {
     await l3.methods.submit_batch(
       new Array(115).fill(0n),   // VK (correct size)
-      new Array(500).fill(0n),   // proof (500 fields — matches ABI exactly)
-      new Array(8).fill(0n),     // public inputs
+      new Array(500).fill(0n),   // proof (500 fields -- matches ABI exactly)
+      new Array(10).fill(0n),    // public inputs (Phase 2: 10-field BatchOutput)
       0n,                        // vk_hash = 0 (matches constructor's stored 0)
       new Array(16).fill(0n),
       new Array(16).fill(0n),
       new Array(8).fill(0n),
       new Array(8).fill(0n),
+      new Array(256).fill(0n),   // private_logs (8 tx * 2 outputs * 16 fields)
     ).send({ from: admin });
     console.log("RESULT: ACCEPTED — verify_honk_proof is a no-op on the sandbox");
   } catch (e: any) {

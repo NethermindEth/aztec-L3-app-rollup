@@ -81,8 +81,11 @@ fn main(
 
     // --- Conservation ---
     let change_amount = total_input - withdraw_amount;
-    let _ = withdraw_amount as u64;
-    let _ = change_amount as u64;
+    // Range-check both halves to prevent field underflow -- matches
+    // payment/src/main.nr's enforcement. See the invariant note there for
+    // the MAX_NOTES_PER_TX=2 ceiling.
+    withdraw_amount.assert_max_bit_size::<64>();
+    change_amount.assert_max_bit_size::<64>();
 
     // Output 0: L2 claim hash.
     let secret = poseidon2_hash([l2_recipient_address, claim_salt]);

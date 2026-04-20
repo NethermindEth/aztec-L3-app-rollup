@@ -47,7 +47,8 @@ global MERGED_LOGS_FLAT: u32 = 512;     // 2 * SUB_BATCH_LOGS_FLAT
 //   [6] private_logs_hash
 //   [7] nullifier_tree_start_index
 //   [8] note_hash_tree_start_index
-global TUBE_PUB_COUNT: u32 = 9;
+//   [9] per_tx_vk_hashes_commit  -- propagated unchanged from batch_app
+global TUBE_PUB_COUNT: u32 = 10;
 
 fn main(
     // --- private inputs ---
@@ -86,6 +87,9 @@ fn main(
     merged_private_logs_hash: pub Field,
     nullifier_tree_start_index: pub Field,
     note_hash_tree_start_index: pub Field,
+    // Per-tx VK binding forwarded from both tube proofs (both must agree).
+    // Pinned on-chain via submit_merged_batch.
+    out_per_tx_vk_hashes_commit: pub Field,
 ) {
     // 1. Verify both tube proofs under ROOT_ROLLUP_HONK against the shared VK.
     //    Both IPA claims are finalized natively at the circuit boundary, so
@@ -228,5 +232,16 @@ fn main(
     assert(
         note_hash_tree_start_index == tube_public_inputs_a[8],
         "pair_tube: note hash tree start index mismatch",
+    );
+
+    // 7. Per-tx VK hashes commit propagation.
+    //    Both tube proofs must agree on the commit. Forward unchanged.
+    assert(
+        tube_public_inputs_a[9] == tube_public_inputs_b[9],
+        "pair_tube: per_tx_vk_hashes_commit mismatch between halves",
+    );
+    assert(
+        out_per_tx_vk_hashes_commit == tube_public_inputs_a[9],
+        "pair_tube: out per_tx_vk_hashes_commit mismatch",
     );
 }

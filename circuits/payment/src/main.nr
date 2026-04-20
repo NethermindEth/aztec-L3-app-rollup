@@ -84,9 +84,17 @@ fn main(
 
     // --- Conservation ---
     let change_amount = total_input - recipient_amount;
-    // Range-check both halves to prevent field underflow.
-    let _ = recipient_amount as u64;
-    let _ = change_amount as u64;
+    // Range-check both halves to prevent field underflow. Explicit
+    // assert_max_bit_size locks the constraint independently of compiler
+    // codegen for `as u64` (the previous form was semantically equivalent
+    // in current Noir but relied on DCE preserving side-effecting casts).
+    //
+    // Invariant note: total_input is the sum of up to MAX_NOTES_PER_TX=2
+    // amounts, each bounded by a prior spend's u64 check, so total_input <
+    // 2 * u64::MAX < Field::MODULUS. If MAX_NOTES_PER_TX ever exceeds ~190,
+    // revisit -- the sum could wrap the field before this range check runs.
+    recipient_amount.assert_max_bit_size::<64>();
+    change_amount.assert_max_bit_size::<64>();
 
     // Output 0: recipient note.
     let recipient_note = Note {

@@ -22,12 +22,22 @@ fn main(
     // --- public inputs ---
     nullifiers: pub [Field; MAX_NOTES_PER_TX],
     note_hashes: pub [Field; MAX_OUTPUTS_PER_TX],
-    state_root: pub Field, // unconstrained here; batch_app verifies it
+    state_root: pub Field,
     logs_commit: pub Field,
 ) {
+    // state_root is batch_app's responsibility (batch_app[_standalone] asserts
+    // tx_public_inputs[i][4] == running batch state). Leaving it unconstrained
+    // here avoids forcing deposit to read tree roots it doesn't use.
     let _ = state_root;
 
     assert(poseidon2_hash(private_logs) == logs_commit, "logs commit mismatch");
+
+    // Range-check amount to match the downstream payment/withdraw u64
+    // invariant. L2's deposit() enforces u128 via `amount as u128`, which is
+    // wider than u64; without this check a user could deposit a note that is
+    // un-spendable (payment's change_amount u64 check would blow). Self-harm,
+    // not exploit, but better to reject at deposit-time with a clear failure.
+    amount.assert_max_bit_size::<64>();
 
     let recipient_pubkey_hash = hash_pubkey(l3_recipient_pubkey_x, l3_recipient_pubkey_y);
 

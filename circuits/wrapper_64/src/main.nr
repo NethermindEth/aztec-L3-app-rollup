@@ -24,7 +24,8 @@ global BATCH_64_LOGS_FLAT: u32 = 2048; // 2 * INNER_LOGS_FLAT
 //   [0..8]  BatchOutput (9 fields incl. private_logs_hash)
 //   [9]     wrapper_vk_hash
 //   [10]    w16_vk_hash
-global INNER_PUB_COUNT: u32 = 11;
+//   [11]    per_tx_vk_hashes_commit
+global INNER_PUB_COUNT: u32 = 12;
 
 fn main(
     // --- private inputs ---
@@ -67,6 +68,7 @@ fn main(
     out_wrapper_vk_hash: pub Field,
     out_w16_vk_hash: pub Field,
     out_w32_vk_hash: pub Field,
+    out_per_tx_vk_hashes_commit: pub Field,  // per-tx VK binding (pinned on-chain)
 ) {
     // 1. Verify both wrapper_32 proofs.
     verify_honk_proof(w32_vk, w32_proof_a, w32_public_inputs_a, w32_vk_hash);
@@ -218,5 +220,16 @@ fn main(
     assert(
         out_w32_vk_hash == w32_vk_hash,
         "wrapper_64: out w32 vk hash mismatch",
+    );
+
+    // 8. Per-tx VK hashes commit propagation.
+    //    Both halves must agree. Forwarded unchanged to contract's submit_batch_64.
+    assert(
+        w32_public_inputs_a[11] == w32_public_inputs_b[11],
+        "wrapper_64: per_tx_vk_hashes_commit mismatch between halves",
+    );
+    assert(
+        out_per_tx_vk_hashes_commit == w32_public_inputs_a[11],
+        "wrapper_64: out per_tx_vk_hashes_commit mismatch",
     );
 }

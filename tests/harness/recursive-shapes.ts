@@ -23,19 +23,29 @@
 export const UH_PROOF_FIELDS = 500;
 export const UH_VK_FIELDS = 115;
 
-// BatchOutput public-input layout (8 fields: old/new state root, 4 batch
-// commitment hashes, 2 tree start indices). Matches BATCH_OUTPUT_FIELDS
-// in contract_recursive/src/main.nr. This is the public-input width for
+// BatchOutput public-input layout (10 fields: old/new state root, 4 batch
+// commitment hashes, private_logs_hash, 2 tree start indices, and
+// per_tx_vk_hashes_commit). Matches BATCH_OUTPUT_FIELDS in
+// contract_recursive/src/main.nr. This is the public-input width for
 // submit_batch (the 8-slot wrapper path).
-export const BATCH_OUTPUT_FIELDS = 8;
+export const BATCH_OUTPUT_FIELDS = 10;
 
 // Aggregator public-input widths. Each level appends inner VK-hash fields
 // that the contract asserts against its committed immutables, closing the
-// inner-VK substitution gap at every level.
-//   - submit_batch_16: 8 BatchOutput + 1 wrapper_vk_hash
-//   - submit_batch_64: 8 BatchOutput + wrapper / w16 / w32 VK hashes
-export const PUB_COUNT_16 = 9;
-export const PUB_COUNT_64 = 11;
+// inner-VK substitution gap at every level. per_tx_vk_hashes_commit rides
+// through unchanged at every level (BatchOutput index 9).
+//   - submit_batch_16: 9 merged BatchOutput + wrapper_vk_hash + per_tx_commit = 11
+//   - submit_batch_64: 9 merged BatchOutput + 3 VK hashes + per_tx_commit = 13
+export const PUB_COUNT_16 = 11;
+export const PUB_COUNT_64 = 13;
+
+// Per-tx encrypted-log payload dimensions (Phase 2 note discovery):
+// MAX_OUTPUTS_PER_TX * PRIVATE_LOG_SIZE_IN_FIELDS = 2 * 16 = 32 fields per tx.
+// Batch-level counts below.
+export const TX_LOG_PAYLOAD_LEN = 32;
+export const BATCH_LOGS_FLAT_COUNT = 256;       // 8 tx * 32 fields
+export const BATCH_16_LOGS_FLAT_COUNT = 512;    // 16 tx * 32
+export const BATCH_64_LOGS_FLAT_COUNT = 2048;   // 64 tx * 32
 
 // 16-slot aggregated batch (wrapper_16). Mirrors BATCH_16_* globals in
 // contract_recursive/src/main.nr.

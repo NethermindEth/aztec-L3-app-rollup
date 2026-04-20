@@ -106,17 +106,15 @@ export class L3Harness {
     const nullCount = artifact.settleInputs.nullifiers.filter((f: Fr) => !f.equals(Fr.ZERO)).length;
     const nhCount = artifact.settleInputs.noteHashes.filter((f: Fr) => !f.equals(Fr.ZERO)).length;
 
+    // Zero-logs placeholder for Phase 2's private_logs calldata. The harness
+    // doesn't exercise real note-discovery delivery (tests/messages/ covers
+    // that); the contract's poseidon2(private_logs) == public_inputs[6]
+    // assert still fires, so we must pass matching arrays.
+    const BATCH_LOGS_FLAT_COUNT = 256;
+    const zeroLogs = new Array<Fr>(BATCH_LOGS_FLAT_COUNT).fill(Fr.ZERO);
+
     if (this.callPrivate) {
-      const publicInputs = [
-        artifact.oldStateRoot,
-        artifact.newStateRoot,
-        artifact.settleInputs.nullifiersBatchHash,
-        artifact.settleInputs.noteHashesBatchHash,
-        artifact.settleInputs.depositNullifiersHash,
-        artifact.settleInputs.withdrawalClaimsHash,
-        artifact.nullifierTreeStartIndex,
-        artifact.noteHashTreeStartIndex,
-      ];
+      const publicInputs = artifact.tubePublicInputs.map((f) => f.toBigInt());
 
       // VK is [Field; 115] — convert 32-byte chunks to field values.
       const tubeVkFieldsFr = vkBytesToFields(artifact.tubeVk);
@@ -134,6 +132,7 @@ export class L3Harness {
           artifact.settleInputs.noteHashes,
           artifact.settleInputs.depositNullifiers,
           artifact.settleInputs.withdrawalClaims,
+          zeroLogs,
         ),
       );
     } else {
@@ -147,6 +146,7 @@ export class L3Harness {
           nhCount,
           artifact.settleInputs.nullifiers,
           artifact.settleInputs.noteHashes,
+          zeroLogs,
         ),
       );
     }

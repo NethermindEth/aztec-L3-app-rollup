@@ -64,7 +64,7 @@ async function main() {
   const l3Artifact = loadContractArtifact(
     JSON.parse(readFileSync(L3_ARTIFACT, "utf-8")) as NoirCompiledContract,
   );
-  const { contract: l3 } = await Contract.deploy(wallet, l3Artifact, [0n, 0n, 0n], "constructor")
+  const { contract: l3 } = await Contract.deploy(wallet, l3Artifact, [0n, 0n, 0n, 0n], "constructor")
     .send({ from: admin });
   console.log(`Token: ${token.address}`);
   console.log(`L3:    ${l3.address}`);
@@ -112,9 +112,17 @@ async function main() {
   const depositNullifiersHash = await poseidon2Hash(depositNullifiers);
   const withdrawalClaimsHash = await poseidon2Hash(withdrawalClaims);
 
+  // Phase 2 zero-logs placeholder: 256 fields (MAX_BATCH * MAX_OUTPUTS_PER_TX * PRIVATE_LOG_SIZE_IN_FIELDS).
+  const privateLogs = new Array(256).fill(Fr.ZERO);
+  const privateLogsHash = await poseidon2Hash(privateLogs);
+
   const oldStateRoot = new Fr(0n); // matches constructor
   const newStateRoot = Fr.random(); // synthetic — sandbox doesn't verify the proof
 
+  // BatchOutput order (10 fields post-Phase-2):
+  // [old_state_root, new_state_root, nullifiers_root, note_hashes_root,
+  //  deposit_nullifiers_hash, withdrawal_claims_hash, private_logs_hash,
+  //  nullifier_tree_start_index, note_hash_tree_start_index, per_tx_vk_hashes_commit]
   const publicInputs = [
     oldStateRoot,
     newStateRoot,
@@ -122,8 +130,10 @@ async function main() {
     noteHashesBatchHash,
     depositNullifiersHash,
     withdrawalClaimsHash,
+    privateLogsHash,
     new Fr(1n), // nullifier_tree_start_index (constructor sets to 1)
     new Fr(0n), // note_hash_tree_start_index (constructor sets to 0)
+    new Fr(0n), // per_tx_vk_hashes_commit (matches constructor's 0n)
   ];
 
   const dummyVk = new Array(VK_LEN).fill(0n);
@@ -136,6 +146,7 @@ async function main() {
     await l3.methods.submit_batch(
       dummyVk, dummyProof, publicInputs, tubeVkHash,
       nullifiers, noteHashes, depositNullifiers, withdrawalClaims,
+      privateLogs,
     ).send({ from: admin });
     console.log("  submit_batch OK");
   } catch (e: any) {
@@ -170,13 +181,14 @@ async function main() {
     const publicInputs2 = [...publicInputs];
     publicInputs2[0] = newStateRoot; // old = previous new
     publicInputs2[1] = newStateRoot2;
-    // Tree indices advanced: null +1, nh +1
-    publicInputs2[6] = new Fr(2n);
-    publicInputs2[7] = new Fr(1n);
+    // Tree indices shifted to [7]/[8] after Phase 2 added private_logs_hash at [6].
+    publicInputs2[7] = new Fr(2n);
+    publicInputs2[8] = new Fr(1n);
 
     await l3.methods.submit_batch(
       dummyVk, dummyProof, publicInputs2, tubeVkHash,
       nullifiers, noteHashes, depositNullifiers, withdrawalClaims,
+      privateLogs,
     ).send({ from: admin });
     console.log("  UNEXPECTED: second submit succeeded (deposit should be consumed)");
   } catch (e: any) {

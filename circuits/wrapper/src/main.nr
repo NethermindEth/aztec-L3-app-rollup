@@ -17,6 +17,7 @@ fn main(
     private_logs_hash: pub Field,
     nullifier_tree_start_index: pub Field,
     note_hash_tree_start_index: pub Field,
+    per_tx_vk_hashes_commit: pub Field,
 ) {
     // 1. Verify the batch_app UltraHonk proof.
     verify_honk_proof(
@@ -36,4 +37,5 @@ fn main(
     assert(batch_app_public_inputs[6] == private_logs_hash);
     assert(batch_app_public_inputs[7] == nullifier_tree_start_index);
     assert(batch_app_public_inputs[8] == note_hash_tree_start_index);
+    assert(batch_app_public_inputs[9] == per_tx_vk_hashes_commit);
 }

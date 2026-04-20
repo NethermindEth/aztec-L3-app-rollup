@@ -19,7 +19,7 @@ pub contract L3IvcSettlement {
 
     // IVC pipeline batch sizes. Must match circuits/batch_app.
     global MAX_BATCH_SIZE: u32 = 8;
-    global BATCH_OUTPUT_FIELDS: u32 = 9;
+    global BATCH_OUTPUT_FIELDS: u32 = 10;
     global BATCH_NULLIFIERS_COUNT: u32 = 16;  // MAX_BATCH_SIZE * 2
     global BATCH_NOTE_HASHES_COUNT: u32 = 16; // MAX_BATCH_SIZE * 2
     global BATCH_LOGS_FLAT_COUNT: u32 = 256;  // MAX_BATCH_SIZE * (2 outputs * 16 fields)
@@ -32,6 +32,9 @@ pub contract L3IvcSettlement {
 
     // private_logs_hash position inside BatchOutput (index 6 in serialize()).
     global PRIVATE_LOGS_HASH_PI_INDEX: u32 = 6;
+
+    // per_tx_vk_hashes_commit position inside BatchOutput (index 9).
+    global PER_TX_VK_HASHES_COMMIT_PI_INDEX: u32 = 9;
 
     // -----------------------------------------------------------------------
     // Storage
@@ -47,6 +50,11 @@ pub contract L3IvcSettlement {
         // merged_vk_hash: the pair_wrapper VK hash (used by submit_merged_batch).
         // Enables Path C: IVC sub-batches + recursive aggregation via pair_wrapper.
         merged_vk_hash: PublicImmutable<Field, Context>,
+        // per_tx_vk_hashes_commit: poseidon2 over the four canonical per-tx VK
+        // hashes (deposit/payment/withdraw/padding). Pinned at deployment so
+        // any batch whose batch_app ran with different per-tx circuits is
+        // rejected (closes the custom-circuit substitution attack).
+        per_tx_vk_hashes_commit: PublicImmutable<Field, Context>,
         batch_nonce: PublicMutable<Field, Context>,
         nullifier_tree_start_index: PublicMutable<Field, Context>,
         note_hash_tree_start_index: PublicMutable<Field, Context>,
@@ -60,10 +68,16 @@ pub contract L3IvcSettlement {
 
     #[external("public")]
     #[initializer]
-    fn constructor(initial_state_root: Field, tube_vk_hash: Field, merged_vk_hash: Field) {
+    fn constructor(
+        initial_state_root: Field,
+        tube_vk_hash: Field,
+        merged_vk_hash: Field,
+        per_tx_vk_hashes_commit: Field,
+    ) {
         self.storage.latest_root.write(initial_state_root);
         self.storage.tube_vk_hash.initialize(tube_vk_hash);
         self.storage.merged_vk_hash.initialize(merged_vk_hash);
+        self.storage.per_tx_vk_hashes_commit.initialize(per_tx_vk_hashes_commit);
         self.storage.batch_nonce.write(0);
         // Nullifier tree index 0 is the genesis zero leaf, so insertions start at 1.
         self.storage.nullifier_tree_start_index.write(1);
@@ -149,6 +163,14 @@ pub contract L3IvcSettlement {
             "submit_batch: private logs hash mismatch",
         );
 
+        // Bind per-tx VK hashes commit: rejects batches whose per-tx circuits
+        // don't match the ones pinned at deployment.
+        assert(
+            public_inputs[PER_TX_VK_HASHES_COMMIT_PI_INDEX]
+                == self.storage.per_tx_vk_hashes_commit.read(),
+            "submit_batch: per-tx VK hashes commit does not match contract's committed value",
+        );
+
         // Count non-zero entries for tree index advancement.
         let mut null_count: Field = 0;
         for i in 0..BATCH_NULLIFIERS_COUNT {
@@ -226,6 +248,17 @@ pub contract L3IvcSettlement {
         assert(
             poseidon2_hash(private_logs_2) == public_inputs_2[PRIVATE_LOGS_HASH_PI_INDEX],
             "submit_two_batches: private logs 2 hash mismatch",
+        );
+
+        // Bind per-tx VK hashes commit on both batches.
+        let committed_per_tx_vk_hashes_commit = self.storage.per_tx_vk_hashes_commit.read();
+        assert(
+            public_inputs_1[PER_TX_VK_HASHES_COMMIT_PI_INDEX] == committed_per_tx_vk_hashes_commit,
+            "submit_two_batches: per-tx VK hashes commit 1 does not match contract's committed value",
+        );
+        assert(
+            public_inputs_2[PER_TX_VK_HASHES_COMMIT_PI_INDEX] == committed_per_tx_vk_hashes_commit,
+            "submit_two_batches: per-tx VK hashes commit 2 does not match contract's committed value",
         );
 
         // 2. Count non-zero entries per batch.
@@ -322,6 +355,15 @@ pub contract L3IvcSettlement {
         assert(
             poseidon2_hash(private_logs) == public_inputs[PRIVATE_LOGS_HASH_PI_INDEX],
             "submit_merged_batch: private logs hash mismatch",
+        );
+
+        // Bind per-tx VK hashes commit: both sub-batches agreed (pair_tube
+        // asserts equality between halves), we just check their shared value
+        // against the contract's committed value.
+        assert(
+            public_inputs[PER_TX_VK_HASHES_COMMIT_PI_INDEX]
+                == self.storage.per_tx_vk_hashes_commit.read(),
+            "submit_merged_batch: per-tx VK hashes commit does not match contract's committed value",
         );
 
         // Count non-zero entries for tree index advancement.

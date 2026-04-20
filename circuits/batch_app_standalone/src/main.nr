@@ -5,12 +5,13 @@
 // constraints that require MegaCircuitBuilder, allowing the circuit to be
 // proved as a standalone UltraHonk proof.
 //
-// The 9 public outputs match BatchOutput's fields in order.
+// The 10 public outputs match BatchOutput's fields in order.
 
 use l3_types::{
     TREE_DEPTH, MAX_NOTES_PER_TX, MAX_OUTPUTS_PER_TX, TX_PUBLIC_INPUT_COUNT,
     TX_LOG_PAYLOAD_LEN, TX_LOGS_COMMIT_INDEX,
     IndexedLeaf, poseidon2_hash,
+    compute_per_tx_vk_hashes_commit,
     compute_state_root, compute_merkle_root,
 };
 use bb_proof_verification::{verify_honk_proof, UltraHonkVerificationKey, UltraHonkZKProof};
@@ -76,6 +77,9 @@ fn main(
     private_logs_hash: pub Field,
     nullifier_tree_start_index: pub Field,
     note_hash_tree_start_index: pub Field,
+    // Commit over the four per-tx VK hashes. Pinned in the on-chain contract;
+    // propagates through the wrapper tree. Blocks foreign-circuit substitution.
+    per_tx_vk_hashes_commit: pub Field,
 ) {
     // 0. Boundary sanity.
     assert(
@@ -292,5 +296,22 @@ fn main(
     assert(
         poseidon2_hash(logs_flat) == private_logs_hash,
         "private logs batch hash mismatch",
+    );
+
+    // 6. Per-tx VK hashes commit.
+    //    Recompute the commit from the four private VK hashes verified above
+    //    and assert equality with the public input. The contract pins this
+    //    value, so any attempt to swap a custom circuit for one of the four
+    //    per-tx slots produces a different commit and fails the on-chain
+    //    binding check.
+    let computed_commit = compute_per_tx_vk_hashes_commit(
+        deposit_vk_hash,
+        payment_vk_hash,
+        withdraw_vk_hash,
+        padding_vk_hash,
+    );
+    assert(
+        computed_commit == per_tx_vk_hashes_commit,
+        "per-tx VK hashes commit mismatch",
     );
 }

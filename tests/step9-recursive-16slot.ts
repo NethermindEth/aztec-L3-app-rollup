@@ -30,7 +30,7 @@ import { readFileSync, writeFileSync } from "fs";
 import { resolve } from "path";
 
 import { TestL3State } from "./harness/state.js";
-import type { TxProofResult } from "./harness/prover.js";
+import { computePerTxVkHashesCommit, type TxProofResult } from "./harness/prover.js";
 import {
   buildBatchProofRecursive,
   buildWrapper16Proof,
@@ -114,6 +114,7 @@ async function main() {
   console.log("Computing wrapper + wrapper_16 VK hashes...");
   const vkStart = performance.now();
   const { vkHash: wrapperVkHash } = await computeWrapperVkHash(api);
+  const perTxVkHashesCommit = await computePerTxVkHashesCommit(api);
   const { vkHash: pairVkHash } = await computeWrapper16VkHash(api);
   console.log(`  wrapper VK hash: ${wrapperVkHash.toString().slice(0, 18)}...`);
   console.log(`  wrapper_16 VK hash: ${pairVkHash.toString().slice(0, 18)}... (${fmt(performance.now() - vkStart)})\n`);
@@ -143,7 +144,7 @@ async function main() {
     wallet, l3Artifact,
     // step9 only exercises submit_batch_16; pp_vk_hash and quad_vk_hash
     // are set to 0 (submit_batch_64 not called in this test).
-    [initialStateRoot.toBigInt(), wrapperVkHash.toBigInt(), pairVkHash.toBigInt(), 0n, 0n],
+    [initialStateRoot.toBigInt(), wrapperVkHash.toBigInt(), pairVkHash.toBigInt(), 0n, 0n, perTxVkHashesCommit.toBigInt()],
     "constructor",
   ).send({ from: admin });
 
@@ -250,11 +251,14 @@ async function main() {
     pairArtifact.mergedNoteHashes,
     pairArtifact.mergedDeposits,
     pairArtifact.mergedWithdrawals,
-    PUB_COUNT_16,   // 9: 8 BatchOutput + 1 inner wrapper_vk_hash
+    PUB_COUNT_16,   // 11: 9 BatchOutput + wrapper_vk_hash + per_tx_vk_hashes_commit
     BATCH_16_NULLIFIERS_COUNT,
     BATCH_16_NOTE_HASHES_COUNT,
     BATCH_16_SIZE,
   );
+
+  // Zero-logs placeholder (tests/messages/ exercises real encryption separately).
+  const zeroLogs16 = new Array(512).fill(0n);
 
   console.log("Submitting via submit_batch_16 (1 L2 tx, 1 settle call)...");
   const submitStart = performance.now();
@@ -268,6 +272,7 @@ async function main() {
       pairArtifact.mergedNoteHashes,
       pairArtifact.mergedDeposits,
       pairArtifact.mergedWithdrawals,
+      zeroLogs16,
     )
     .send({ from: admin });
   const submitMs = performance.now() - submitStart;

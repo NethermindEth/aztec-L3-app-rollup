@@ -66,7 +66,8 @@ impl TestL3 {
         // submit_batch_64) are exercised in these state-machine tests.
         // verify_honk_proof is a no-op in TXE ACIR simulation anyway, so
         // private submit_* paths cannot be gate-tested locally.
-        let l3_init = L3RecursiveSettlement::interface().constructor(0, 0, 0, 0, 0);
+        // Args: genesis root, tube/w16/w32/w64 VK hashes, per_tx_vk_hashes_commit.
+        let l3_init = L3RecursiveSettlement::interface().constructor(0, 0, 0, 0, 0, 0);
         let l3 = env.deploy("L3RecursiveSettlement").with_public_initializer(admin, l3_init);
 
         // Fund L3 contract with tokens for withdrawal payouts.

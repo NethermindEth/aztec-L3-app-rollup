@@ -32,7 +32,24 @@ pub global TX_LOGS_COMMIT_INDEX: u32 = 5;
 pub global TX_LOG_PAYLOAD_LEN: u32 = MAX_OUTPUTS_PER_TX * messages::constants::PRIVATE_LOG_SIZE_IN_FIELDS;
 
 // Size of the BatchOutput struct in fields. Identical for IVC and Recursive pipelines.
-pub global BATCH_OUTPUT_FIELDS: u32 = 9;
+// Field layout:
+//   [0] old_state_root
+//   [1] new_state_root
+//   [2] nullifiers_root
+//   [3] note_hashes_root
+//   [4] deposit_nullifiers_hash
+//   [5] withdrawal_claims_hash
+//   [6] private_logs_hash
+//   [7] nullifier_tree_start_index
+//   [8] note_hash_tree_start_index
+//   [9] per_tx_vk_hashes_commit    -- poseidon2([dep, pay, wit, pad]_vk_hash).
+//                                     Pinned on-chain so an attacker can't swap
+//                                     in a custom per-tx circuit.
+pub global BATCH_OUTPUT_FIELDS: u32 = 10;
+
+// Index of per_tx_vk_hashes_commit inside BatchOutput / every downstream
+// public-input layout that embeds BatchOutput at the front.
+pub global PER_TX_VK_HASHES_COMMIT_INDEX: u32 = 9;
 
 // NOTE: MAX_BATCH_SIZE, BATCH_NULLIFIERS_COUNT, and BATCH_NOTE_HASHES_COUNT are NOT
 // defined here. They differ per pipeline and are owned by each batch-aggregation
@@ -73,6 +90,7 @@ pub struct BatchOutput {
     pub private_logs_hash: Field,
     pub nullifier_tree_start_index: Field,
     pub note_hash_tree_start_index: Field,
+    pub per_tx_vk_hashes_commit: Field,
 }
 
 impl BatchOutput {
@@ -87,8 +105,21 @@ impl BatchOutput {
             self.private_logs_hash,
             self.nullifier_tree_start_index,
             self.note_hash_tree_start_index,
+            self.per_tx_vk_hashes_commit,
         ]
     }
+}
+
+// Canonical commit over the four per-tx VK hashes. The on-chain contract pins
+// this; every aggregator level carries it unchanged; the contract asserts the
+// committed value to block foreign-circuit substitution attacks.
+pub fn compute_per_tx_vk_hashes_commit(
+    deposit_vk_hash: Field,
+    payment_vk_hash: Field,
+    withdraw_vk_hash: Field,
+    padding_vk_hash: Field,
+) -> Field {
+    poseidon2_hash([deposit_vk_hash, payment_vk_hash, withdraw_vk_hash, padding_vk_hash])
 }
 
 // ---------------------------------------------------------------------------

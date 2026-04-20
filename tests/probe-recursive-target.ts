@@ -215,7 +215,7 @@ async function main() {
       const { contract: token } = await TokenContract.deploy(wallet, admin, "T", "T", 18).send({ from: admin });
       const { contract: l3 } = await Contract.deploy(
         wallet, l3Artifact,
-        [contractState.stateRoot.toBigInt(), wrapperVkForContract.toBigInt(), pairVkForContract.toBigInt(), 0n, 0n],
+        [contractState.stateRoot.toBigInt(), wrapperVkForContract.toBigInt(), pairVkForContract.toBigInt(), 0n, 0n, 0n],
         "constructor",
       ).send({ from: admin });
       await token.methods.mint_to_public(l3.address, 1_000_000n).send({ from: admin });

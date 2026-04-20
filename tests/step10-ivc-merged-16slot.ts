@@ -36,6 +36,7 @@ import {
   buildBatchProof,
   computeTubeVkHash,
   computePairTubeVkHash,
+  computePerTxVkHashesCommit,
   buildPairTubeProof,
   type BatchArtifact,
   type TxProofResult,
@@ -102,6 +103,7 @@ async function main() {
   const vkStart = performance.now();
   const { vkHash: tubeVkHash } = await computeTubeVkHash(api);
   const { vkHash: pairTubeVkHash } = await computePairTubeVkHash(api);
+  const perTxVkHashesCommit = await computePerTxVkHashesCommit(api);
   console.log(`  tube VK hash:      ${tubeVkHash.toString().slice(0, 18)}...`);
   console.log(`  pair_tube VK hash: ${pairTubeVkHash.toString().slice(0, 18)}... (${fmt(performance.now() - vkStart)})\n`);
 
@@ -128,7 +130,7 @@ async function main() {
   );
   const { contract: l3 } = await Contract.deploy(
     wallet, l3Artifact,
-    [initialStateRoot.toBigInt(), tubeVkHash.toBigInt(), pairTubeVkHash.toBigInt()],
+    [initialStateRoot.toBigInt(), tubeVkHash.toBigInt(), pairTubeVkHash.toBigInt(), perTxVkHashesCommit.toBigInt()],
     "constructor",
   ).send({ from: admin });
 
@@ -223,6 +225,9 @@ async function main() {
   const daBytes = daFields * 32;
   console.log(`DA: ${daFields} fields (${daBytes} bytes)\n`);
 
+  // Zero-logs placeholder for merged batch (512 fields = 16 tx * 32).
+  const zeroLogsMerged = new Array(512).fill(0n);
+
   console.log("Submitting via submit_merged_batch (1 L2 tx, 1 settle call)...");
   const submitStart = performance.now();
   await l3.methods
@@ -235,6 +240,7 @@ async function main() {
       pairArtifact.mergedNoteHashes,
       pairArtifact.mergedDeposits,
       pairArtifact.mergedWithdrawals,
+      zeroLogsMerged,
     )
     .send({ from: admin });
   const submitMs = performance.now() - submitStart;

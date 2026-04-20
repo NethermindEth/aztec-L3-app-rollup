@@ -54,6 +54,7 @@ import {
   proveDeposit,
   type BatchArtifact,
 } from "./harness/prover-recursive.js";
+import { computePerTxVkHashesCommit } from "./harness/prover.js";
 import {
   BATCH_64_SIZE,
   BATCH_64_NULLIFIERS_COUNT,
@@ -111,6 +112,7 @@ async function main() {
   console.log("Computing VK hashes for all 4 aggregation levels...");
   const vkStart = performance.now();
   const { vkHash: wrapperVkHash } = await computeWrapperVkHash(api);
+  const perTxVkHashesCommit = await computePerTxVkHashesCommit(api);
   const { vkHash: pairVkHash } = await computeWrapper16VkHash(api);
   const { vkHash: ppVkHash } = await computeWrapper32VkHash(api);
   const { vkHash: quadVkHash } = await computeWrapper64VkHash(api);
@@ -145,6 +147,7 @@ async function main() {
       pairVkHash.toBigInt(),
       ppVkHash.toBigInt(),
       quadVkHash.toBigInt(),
+      perTxVkHashesCommit.toBigInt(),
     ],
     "constructor",
   ).send({ from: admin });
@@ -262,11 +265,14 @@ async function main() {
     quad.mergedNoteHashes,
     quad.mergedDeposits,
     quad.mergedWithdrawals,
-    PUB_COUNT_64,   // 11: 8 BatchOutput + wrapper/pair/pp VK hashes
+    PUB_COUNT_64,   // 13: 9 BatchOutput + wrapper/pair/pp VK hashes + per_tx_vk_hashes_commit
     BATCH_64_NULLIFIERS_COUNT,
     BATCH_64_NOTE_HASHES_COUNT,
     BATCH_64_SIZE,
   );
+
+  // Zero-logs placeholder (tests/messages/ exercises real encryption separately).
+  const zeroLogs64 = new Array(2048).fill(0n);
 
   console.log("Submitting via submit_batch_64 (1 L2 tx, 1 settle call)...");
   const submitStart = performance.now();
@@ -280,6 +286,7 @@ async function main() {
       quad.mergedNoteHashes,
       quad.mergedDeposits,
       quad.mergedWithdrawals,
+      zeroLogs64,
     )
     .send({ from: admin });
   const submitMs = performance.now() - submitStart;

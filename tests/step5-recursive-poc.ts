@@ -39,6 +39,7 @@ import {
   type TxProofResult,
   type BatchArtifact,
 } from "./harness/prover-recursive.js";
+import { computePerTxVkHashesCommit } from "./harness/prover.js";
 import { assertRecursiveSubmitShape, BATCH_OUTPUT_FIELDS } from "./harness/recursive-shapes.js";
 
 // -------------------------------------------------------------------------
@@ -86,6 +87,7 @@ async function main() {
   console.log("Computing wrapper VK hash...");
   const startVk = performance.now();
   const { vkHash: wrapperVkHash } = await computeWrapperVkHash(api);
+  const perTxVkHashesCommit = await computePerTxVkHashesCommit(api);
   console.log(`  wrapper VK hash: ${wrapperVkHash.toString().slice(0, 18)}...`);
   console.log(`  (${((performance.now() - startVk) / 1000).toFixed(1)}s)\n`);
 
@@ -123,7 +125,7 @@ async function main() {
     // step5 only exercises submit_batch (wrapper path); merged_vk_hash,
     // pp_vk_hash, and quad_vk_hash are set to 0 -- their entry points
     // (submit_batch_16 / submit_batch_64) are not called in this test.
-    [initialStateRoot.toBigInt(), wrapperVkHash.toBigInt(), 0n, 0n, 0n],
+    [initialStateRoot.toBigInt(), wrapperVkHash.toBigInt(), 0n, 0n, 0n, perTxVkHashesCommit.toBigInt()],
     "constructor",
   ).send({ from: admin });
   console.log(`  L3:    ${l3.address}`);
@@ -176,6 +178,9 @@ async function main() {
       RECURSIVE_BATCH_SIZING.maxBatchSize,
     );
 
+    // Phase 2 zero-logs placeholder: 256 fields (8 tx * 32).
+    const zeroLogs8 = new Array(256).fill(0n);
+
     await l3.methods
       .submit_batch(
         tubeVkFields,
@@ -186,6 +191,7 @@ async function main() {
         artifact.settleInputs.noteHashes,
         artifact.settleInputs.depositNullifiers,
         artifact.settleInputs.withdrawalClaims,
+        zeroLogs8,
       )
       .send({ from: admin });
 

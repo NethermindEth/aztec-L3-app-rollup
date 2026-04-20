@@ -25,6 +25,24 @@ const MAX_OUTPUTS_PER_TX = 2;
 const BATCH_NULLIFIERS_COUNT = IVC_BATCH_SIZING.batchNullifiersCount;   // 16
 const BATCH_NOTE_HASHES_COUNT = IVC_BATCH_SIZING.batchNoteHashesCount;  // 16
 const MEGA_VK_LENGTH = 127;
+const TX_LOG_PAYLOAD_LEN = 32;     // MAX_OUTPUTS_PER_TX * PRIVATE_LOG_SIZE_IN_FIELDS
+const BATCH_LOGS_FLAT_LEN = 256;   // MAX_BATCH_SIZE * TX_LOG_PAYLOAD_LEN
+
+// Zero-logs placeholders for the harness (no real note-discovery delivery in
+// e2e tests; tests/messages/ exercises the encryption path separately).
+const TX_ZERO_LOGS: string[] = new Array(TX_LOG_PAYLOAD_LEN).fill("0");
+const BATCH_ZERO_LOGS: string[] = new Array(BATCH_LOGS_FLAT_LEN).fill("0");
+
+let cachedTxLogsCommit: Fr | null = null;
+async function txLogsCommit(): Promise<Fr> {
+  if (!cachedTxLogsCommit) cachedTxLogsCommit = await poseidon2Hash(TX_ZERO_LOGS.map((s) => new Fr(BigInt(s))));
+  return cachedTxLogsCommit;
+}
+let cachedBatchLogsHash: Fr | null = null;
+async function batchLogsHash(): Promise<Fr> {
+  if (!cachedBatchLogsHash) cachedBatchLogsHash = await poseidon2Hash(BATCH_ZERO_LOGS.map((s) => new Fr(BigInt(s))));
+  return cachedBatchLogsHash;
+}
 
 // -------------------------------------------------------------------------
 // Circuit loading (cached)
@@ -164,11 +182,14 @@ export async function proveDeposit(
   const nHash = await state.noteHash(pkHash, amount, tokenId, salt);
   const sr = state.stateRoot;
 
+  const lc = await txLogsCommit();
   const { proof, vk, publicInputs } = await proveTx(api, "deposit", {
     amount: f2s(amount), token_id: f2s(tokenId),
     l3_recipient_pubkey_x: f2s(recipientPubkeyX), l3_recipient_pubkey_y: f2s(recipientPubkeyY),
     salt: f2s(salt),
+    private_logs: TX_ZERO_LOGS,
     nullifiers: [f2s(dHash), "0"], note_hashes: [f2s(nHash), "0"], state_root: f2s(sr),
+    logs_commit: f2s(lc),
   }, "noir-recursive");
 
   return {
@@ -224,6 +245,7 @@ export async function provePayment(
   const cNoteHash = !change.equals(Fr.ZERO)
     ? await state.noteHash(ownerPkHash, change, tokenId, outputSalts[1]) : Fr.ZERO;
 
+  const lc = await txLogsCommit();
   const { proof, vk, publicInputs } = await proveTx(api, "payment", {
     owner_secret: f2s(ownerSecret), input_notes: notes, input_note_indices: noteIdx,
     input_note_siblings: noteSibs, low_leaves: lLeaves, low_leaf_indices: lIdx,
@@ -231,7 +253,9 @@ export async function provePayment(
     recipient_pubkey_x: f2s(recipientPubkeyX), recipient_pubkey_y: f2s(recipientPubkeyY),
     output_salts: fs2s(outputSalts), recipient_amount: f2s(recipientAmount),
     note_hash_tree_root: f2s(nhRoot), nullifier_tree_root: f2s(nullRoot),
+    private_logs: TX_ZERO_LOGS,
     nullifiers: fs2s(nulls), note_hashes: [f2s(rNoteHash), f2s(cNoteHash)], state_root: f2s(sr),
+    logs_commit: f2s(lc),
   }, "noir-recursive");
 
   return {
@@ -286,6 +310,7 @@ export async function proveWithdraw(
   const cNoteHash = !change.equals(Fr.ZERO)
     ? await state.noteHash(ownerPkHash, change, tokenId, changeSalt) : Fr.ZERO;
 
+  const lc = await txLogsCommit();
   const { proof, vk, publicInputs } = await proveTx(api, "withdraw", {
     owner_secret: f2s(ownerSecret), l3_notes: l3n, l3_note_indices: l3idx,
     l3_note_siblings: l3sibs, low_leaves: lLeaves, low_leaf_indices: lIdx,
@@ -293,7 +318,9 @@ export async function proveWithdraw(
     l2_token_address: f2s(l2TokenAddr), l2_recipient_address: f2s(l2Recipient),
     claim_salt: f2s(claimSalt), withdraw_amount: f2s(withdrawAmt), change_salt: f2s(changeSalt),
     note_hash_tree_root: f2s(nhRoot), nullifier_tree_root: f2s(nullRoot),
+    private_logs: TX_ZERO_LOGS,
     nullifiers: fs2s(nulls), note_hashes: [f2s(claimHash), f2s(cNoteHash)], state_root: f2s(sr),
+    logs_commit: f2s(lc),
   }, "noir-recursive");
 
   return {
@@ -309,12 +336,15 @@ export async function proveWithdraw(
 let cachedPadding: TxProofResult | null = null;
 export async function provePadding(api: Barretenberg): Promise<TxProofResult> {
   if (cachedPadding) return cachedPadding;
+  const lc = await txLogsCommit();
   const { proof, vk } = await proveTx(api, "padding", {
+    private_logs: TX_ZERO_LOGS,
     nullifiers: ["0", "0"], note_hashes: ["0", "0"], state_root: "0",
+    logs_commit: f2s(lc),
   }, "noir-recursive");
   cachedPadding = {
     type: "padding", proof, vk,
-    publicInputs: ["0", "0", "0", "0", "0"],
+    publicInputs: ["0", "0", "0", "0", "0", f2s(lc)],
     nullifiers: [Fr.ZERO, Fr.ZERO], noteHashes: [Fr.ZERO, Fr.ZERO],
   };
   return cachedPadding;
@@ -404,10 +434,16 @@ export async function buildBatchProof(
   const batchAppCircuit = loadCircuit("batch_app");
   const batchNoir = new Noir(batchAppCircuit);
 
-  const depositVkBytes = deposits.length > 0 ? deposits[0].vk : paddingProof.vk;
-  const paymentVkBytes = payments.length > 0 ? payments[0].vk : paddingProof.vk;
-  const withdrawVkBytes = withdrawals.length > 0 ? withdrawals[0].vk : paddingProof.vk;
-  const paddVkBytes = paddingProof.vk;
+  // Always use CANONICAL per-tx VKs, not per-section fallbacks -- batch_app
+  // computes per_tx_vk_hashes_commit over whatever VK hashes we hand it, and
+  // the contract has pinned the canonical (deposit, payment, withdraw, padding)
+  // commit at deploy. Substituting padding VK for empty sections would make
+  // the commit depend on batch contents, breaking the pinning.
+  const canonVks = await getCanonicalPerTxVks(api);
+  const depositVkBytes = canonVks.deposit;
+  const paymentVkBytes = canonVks.payment;
+  const withdrawVkBytes = canonVks.withdraw;
+  const paddVkBytes = canonVks.padding;
 
   const VK_FIELDS = 115; // ULTRA_HONK_VK_LENGTH
   const PROOF_FIELDS = 500; // ULTRA_HONK_PROOF_LENGTH
@@ -415,15 +451,30 @@ export async function buildBatchProof(
   // VK hashes via poseidon2.
   const vkHashStr = async (vk: Uint8Array) => f2s(await p2h(vkToFields(vk)));
 
+  const depositVkHash = await vkHashStr(depositVkBytes);
+  const paymentVkHash = await vkHashStr(paymentVkBytes);
+  const withdrawVkHash = await vkHashStr(withdrawVkBytes);
+  const paddingVkHash = await vkHashStr(paddVkBytes);
+  // per_tx_vk_hashes_commit: poseidon2 over the four canonical per-tx VK hashes.
+  // Pinned at contract deploy; batch_app / batch_app_standalone emit it as
+  // BatchOutput[9]; contract asserts PI matches storage.
+  const perTxVkHashesCommit = f2s(await p2h([
+    new Fr(BigInt(depositVkHash)),
+    new Fr(BigInt(paymentVkHash)),
+    new Fr(BigInt(withdrawVkHash)),
+    new Fr(BigInt(paddingVkHash)),
+  ]));
+  const privateLogsHashStr = f2s(await batchLogsHash());
+
   const { witness: batchWitness, returnValue: batchReturn } = await batchNoir.execute({
     deposit_vk: bytesToFieldStrings(depositVkBytes, VK_FIELDS),
-    deposit_vk_hash: await vkHashStr(depositVkBytes),
+    deposit_vk_hash: depositVkHash,
     payment_vk: bytesToFieldStrings(paymentVkBytes, VK_FIELDS),
-    payment_vk_hash: await vkHashStr(paymentVkBytes),
+    payment_vk_hash: paymentVkHash,
     withdraw_vk: bytesToFieldStrings(withdrawVkBytes, VK_FIELDS),
-    withdraw_vk_hash: await vkHashStr(withdrawVkBytes),
+    withdraw_vk_hash: withdrawVkHash,
     padding_vk: bytesToFieldStrings(paddVkBytes, VK_FIELDS),
-    padding_vk_hash: await vkHashStr(paddVkBytes),
+    padding_vk_hash: paddingVkHash,
     deposit_count: deposits.length.toString(),
     payment_count: payments.length.toString(),
     withdraw_count: withdrawals.length.toString(),
@@ -438,12 +489,14 @@ export async function buildBatchProof(
     nullifier_low_leaf_siblings: nullLowLeafSibs,
     nullifier_new_leaf_siblings: nullNewLeafSibs,
     note_hash_insertion_siblings: nhInsertSibs,
+    private_logs: slots.map(() => TX_ZERO_LOGS),
     old_state_root: f2s(oldStateRoot),
     new_state_root: f2s(newStateRoot),
     nullifiers_batch_hash: f2s(settleInputs.nullifiersBatchHash),
     note_hashes_batch_hash: f2s(settleInputs.noteHashesBatchHash),
     deposit_nullifiers_hash: f2s(settleInputs.depositNullifiersHash),
     withdrawal_claims_hash: f2s(settleInputs.withdrawalClaimsHash),
+    private_logs_hash: privateLogsHashStr,
     nullifier_tree_start_index: f2s(nullStartIdx),
     note_hash_tree_start_index: f2s(nhStartIdx),
   });
@@ -521,7 +574,7 @@ export async function buildBatchProof(
     return BigInt(hex).toString();
   };
 
-  const BATCH_OUTPUT_FIELDS = 8;
+  const BATCH_OUTPUT_FIELDS = 10;
   const batchOutputStrs = chonkProofFields.slice(0, BATCH_OUTPUT_FIELDS).map(fieldBufToStr);
   const proofBodyStrs = chonkProofFields.slice(BATCH_OUTPUT_FIELDS).map(fieldBufToStr);
 
@@ -539,8 +592,10 @@ export async function buildBatchProof(
     note_hashes_batch_hash: batchOutputStrs[3],
     deposit_nullifiers_hash: batchOutputStrs[4],
     withdrawal_claims_hash: batchOutputStrs[5],
-    nullifier_tree_start_index: batchOutputStrs[6],
-    note_hash_tree_start_index: batchOutputStrs[7],
+    private_logs_hash: batchOutputStrs[6],
+    nullifier_tree_start_index: batchOutputStrs[7],
+    note_hash_tree_start_index: batchOutputStrs[8],
+    per_tx_vk_hashes_commit: batchOutputStrs[9],
   });
 
   const tubeBackend = new UltraHonkBackend(tubeCircuit.bytecode, api);
@@ -581,6 +636,64 @@ export async function computeTubeVkHash(api: Barretenberg): Promise<{ vkHash: Fr
   const vkFields = vkToFields(vk);
   const vkHash = await p2h(vkFields);
   return { vkHash, vk };
+}
+
+// -------------------------------------------------------------------------
+// Compute per_tx_vk_hashes_commit -- poseidon2 over the four canonical
+// per-tx VK hashes (deposit / payment / withdraw / padding).
+//
+// This must equal the value batch_app / batch_app_standalone emits as
+// BatchOutput[9]; the L2 contract pins this at deploy time via its
+// per_tx_vk_hashes_commit immutable storage slot so that a batch proved
+// with any non-canonical per-tx circuit is rejected. See DESIGN_DECISIONS
+// on the per-tx VK substitution attack class.
+//
+// Both aggregation paths (Recursive and IVC) use the same per-tx circuits
+// proved at noir-recursive target; the commit is therefore a build-time
+// constant shared across both paths.
+// -------------------------------------------------------------------------
+
+export async function computePerTxVkHashesCommit(api: Barretenberg): Promise<Fr> {
+  const vks = await getCanonicalPerTxVks(api);
+  const [dep, pay, wit, pad] = await Promise.all([
+    p2h(vkToFields(vks.deposit)),
+    p2h(vkToFields(vks.payment)),
+    p2h(vkToFields(vks.withdraw)),
+    p2h(vkToFields(vks.padding)),
+  ]);
+  return p2h([dep, pay, wit, pad]);
+}
+
+// Canonical per-tx VKs. These are used both by the contract's pinned
+// per_tx_vk_hashes_commit and by batch_app's witness, so the two agree
+// regardless of which per-tx sections are populated in a given batch.
+// Cached because the VKs are deterministic per build.
+const perTxVkCache = new Map<string, Uint8Array>();
+
+export interface PerTxVks {
+  deposit: Uint8Array;
+  payment: Uint8Array;
+  withdraw: Uint8Array;
+  padding: Uint8Array;
+}
+
+export async function getCanonicalPerTxVks(api: Barretenberg): Promise<PerTxVks> {
+  async function load(name: string): Promise<Uint8Array> {
+    const cached = perTxVkCache.get(name);
+    if (cached) return cached;
+    const circuit = loadCircuit(name);
+    const backend = new UltraHonkBackend(circuit.bytecode, api);
+    const vk = await backend.getVerificationKey({ verifierTarget: "noir-recursive" });
+    perTxVkCache.set(name, vk);
+    return vk;
+  }
+  const [deposit, payment, withdraw, padding] = await Promise.all([
+    load("deposit"),
+    load("payment"),
+    load("withdraw"),
+    load("padding"),
+  ]);
+  return { deposit, payment, withdraw, padding };
 }
 
 // -------------------------------------------------------------------------

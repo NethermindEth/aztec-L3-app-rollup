@@ -28,6 +28,7 @@ import {
   proveDeposit,
   buildBatchProof,
   computeTubeVkHash,
+  computePerTxVkHashesCommit,
   type BatchArtifact,
   type TxProofResult,
 } from "./harness/prover.js";
@@ -80,6 +81,7 @@ async function main() {
   console.log("Computing tube VK hash...");
   const vkStart = performance.now();
   const { vkHash: tubeVkHash } = await computeTubeVkHash(api);
+  const perTxVkHashesCommit = await computePerTxVkHashesCommit(api);
   console.log(`  VK hash: ${tubeVkHash.toString().slice(0, 18)}... (${fmt(performance.now() - vkStart)})\n`);
 
   // Accounts
@@ -105,7 +107,7 @@ async function main() {
   );
   const { contract: l3 } = await Contract.deploy(
     wallet, l3Artifact,
-    [initialStateRoot.toBigInt(), tubeVkHash.toBigInt(), 0n],
+    [initialStateRoot.toBigInt(), tubeVkHash.toBigInt(), 0n, perTxVkHashesCommit.toBigInt()],
     "constructor",
   ).send({ from: admin });
 
@@ -244,6 +246,9 @@ async function main() {
   const daBytes = daFields * 32;
   console.log(`DA: ${daFields} fields (${daBytes} bytes)\n`);
 
+  // Zero-logs placeholders for Phase 2 private_logs args (256 fields per 8-slot batch).
+  const zeroLogs8 = new Array(256).fill(0n);
+
   console.log("Submitting via submit_two_batches (1 L2 tx, 2 settle calls)...");
   const submitStart = performance.now();
   await l3.methods
@@ -256,12 +261,14 @@ async function main() {
       artifactA.settleInputs.noteHashes,
       artifactA.settleInputs.depositNullifiers,
       artifactA.settleInputs.withdrawalClaims,
+      zeroLogs8,
       tubeProofFieldsB,
       artifactB.tubePublicInputs,
       artifactB.settleInputs.nullifiers,
       artifactB.settleInputs.noteHashes,
       artifactB.settleInputs.depositNullifiers,
       artifactB.settleInputs.withdrawalClaims,
+      zeroLogs8,
     )
     .send({ from: admin });
   const submitMs = performance.now() - submitStart;

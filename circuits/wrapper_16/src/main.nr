@@ -26,7 +26,7 @@ global BATCH_16_NULLIFIERS: u32 = 32;
 global BATCH_16_NOTE_HASHES: u32 = 32;
 global BATCH_16_LOGS_FLAT: u32 = 512;   // 2 * SUB_BATCH_LOGS_FLAT
 
-// BatchOutput layout (9 fields):
+// wrapper public-input layout (10 fields):
 //   [0] old_state_root
 //   [1] new_state_root
 //   [2] nullifiers_batch_hash
@@ -36,11 +36,13 @@ global BATCH_16_LOGS_FLAT: u32 = 512;   // 2 * SUB_BATCH_LOGS_FLAT
 //   [6] private_logs_hash
 //   [7] nullifier_tree_start_index
 //   [8] note_hash_tree_start_index
-global WRAPPER_PUB_COUNT: u32 = 9;
+//   [9] per_tx_vk_hashes_commit  -- poseidon2 of the four per-tx VK hashes,
+//                                    propagated unchanged through the tree.
+global WRAPPER_PUB_COUNT: u32 = 10;
 
-// wrapper_16 outputs 10 fields: 9 BatchOutput + 1 wrapper_vk_hash binding.
-// The contract's submit_batch_16 asserts public_inputs[9] matches its
-// committed tube_vk_hash (inner-VK substitution hardening).
+// wrapper_16 outputs 11 fields: 9 merged BatchOutput + out_wrapper_vk_hash
+// (inner-VK substitution hardening; contract pins it) + per_tx_vk_hashes_commit
+// (per-tx circuit binding; contract pins it).
 
 fn main(
     // --- private inputs ---
@@ -81,6 +83,8 @@ fn main(
     note_hash_tree_start_index: pub Field,
     // Bound to contract's tube_vk_hash via submit_batch_16:
     out_wrapper_vk_hash: pub Field,
+    // Bound to contract's per_tx_vk_hashes_commit via submit_batch_16:
+    out_per_tx_vk_hashes_commit: pub Field,
 ) {
     // 1. Verify both wrapper proofs against the shared VK.
     verify_honk_proof(wrapper_vk, wrapper_proof_a, wrapper_public_inputs_a, wrapper_vk_hash);
@@ -216,5 +220,18 @@ fn main(
     assert(
         out_wrapper_vk_hash == wrapper_vk_hash,
         "wrapper_16: out wrapper vk hash mismatch",
+    );
+
+    // 8. Per-tx VK hashes commit propagation.
+    //    Both halves must agree on the commit (same per-tx circuits were used
+    //    for both sub-batches). Forward unchanged; contract's submit_batch_16
+    //    binds it to its committed per_tx_vk_hashes_commit storage slot.
+    assert(
+        wrapper_public_inputs_a[9] == wrapper_public_inputs_b[9],
+        "wrapper_16: per_tx_vk_hashes_commit mismatch between halves",
+    );
+    assert(
+        out_per_tx_vk_hashes_commit == wrapper_public_inputs_a[9],
+        "wrapper_16: out per_tx_vk_hashes_commit mismatch",
     );
 }

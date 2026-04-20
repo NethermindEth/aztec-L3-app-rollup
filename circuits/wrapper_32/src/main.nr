@@ -22,10 +22,11 @@ global BATCH_32_NULLIFIERS: u32 = 64;
 global BATCH_32_NOTE_HASHES: u32 = 64;
 global BATCH_32_LOGS_FLAT: u32 = 1024; // 2 * INNER_LOGS_FLAT
 
-// Inner wrapper_16 public-input layout (10 fields):
-//   [0..8] BatchOutput (9 fields incl. private_logs_hash)
-//   [9]    wrapper_vk_hash (inner VK binding from wrapper_16)
-global INNER_PUB_COUNT: u32 = 10;
+// Inner wrapper_16 public-input layout (11 fields):
+//   [0..8]  BatchOutput (9 fields incl. private_logs_hash)
+//   [9]     wrapper_vk_hash (inner VK binding from wrapper_16)
+//   [10]    per_tx_vk_hashes_commit (per-tx VK binding, propagated unchanged)
+global INNER_PUB_COUNT: u32 = 11;
 
 fn main(
     // --- private inputs ---
@@ -64,8 +65,9 @@ fn main(
     merged_private_logs_hash: pub Field,
     nullifier_tree_start_index: pub Field,
     note_hash_tree_start_index: pub Field,
-    out_wrapper_vk_hash: pub Field,  // wrapper VK hash propagated from inner
-    out_w16_vk_hash: pub Field,      // wrapper_16 VK hash this proof aggregated over
+    out_wrapper_vk_hash: pub Field,            // wrapper VK hash propagated from inner
+    out_w16_vk_hash: pub Field,                // wrapper_16 VK hash this proof aggregated over
+    out_per_tx_vk_hashes_commit: pub Field,    // per-tx VK binding (pinned on-chain)
 ) {
     // 1. Verify both wrapper_16 proofs.
     verify_honk_proof(w16_vk, w16_proof_a, w16_public_inputs_a, w16_vk_hash);
@@ -210,5 +212,16 @@ fn main(
     assert(
         out_w16_vk_hash == w16_vk_hash,
         "wrapper_32: out w16 vk hash mismatch",
+    );
+
+    // 8. Per-tx VK hashes commit propagation.
+    //    Both halves must agree. Forwarded unchanged to wrapper_64 / contract.
+    assert(
+        w16_public_inputs_a[10] == w16_public_inputs_b[10],
+        "wrapper_32: per_tx_vk_hashes_commit mismatch between halves",
+    );
+    assert(
+        out_per_tx_vk_hashes_commit == w16_public_inputs_a[10],
+        "wrapper_32: out per_tx_vk_hashes_commit mismatch",
     );
 }

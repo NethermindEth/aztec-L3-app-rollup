@@ -19,6 +19,7 @@
     "verify:recursive:negative": "npx tsx verify-negative-tests.ts",
     "probe:chain:64": "npx tsx probe-chain-binding-64.ts",
     "test:messages": "npx tsx messages-reference.test.ts",
+    "test:messages:interop": "npx tsx messages-aztec-interop.test.ts",
     "test:discovery": "npx tsx note-discovery.test.ts"
   },
   "dependencies": {

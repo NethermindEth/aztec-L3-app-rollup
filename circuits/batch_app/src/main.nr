@@ -2,6 +2,7 @@ use l3_types::{
     TREE_DEPTH, MAX_NOTES_PER_TX, MAX_OUTPUTS_PER_TX, TX_PUBLIC_INPUT_COUNT,
     TX_LOG_PAYLOAD_LEN, TX_LOGS_COMMIT_INDEX,
     BatchOutput, IndexedLeaf, poseidon2_hash,
+    compute_per_tx_vk_hashes_commit,
     compute_state_root, compute_merkle_root,
 };
 use bb_proof_verification::{verify_honk_proof, UltraHonkVerificationKey, UltraHonkZKProof};
@@ -59,7 +60,7 @@ fn main(
     // its logs_commit public input; batch_app just re-checks + aggregates.
     private_logs: [[Field; TX_LOG_PAYLOAD_LEN]; MAX_BATCH_SIZE],
 
-    // These 9 fields flow to the next kernel via return_data BatchOutput.
+    // These 10 fields flow to the next kernel via return_data BatchOutput.
     // They are NOT declared pub because in the IVC context, pub inputs inflate
     // the VK's num_public_inputs beyond the IVC IO size, breaking accumulation.
     // The values are still constrained by asserts in the circuit body.
@@ -72,6 +73,10 @@ fn main(
     private_logs_hash: Field,
     nullifier_tree_start_index: Field,
     note_hash_tree_start_index: Field,
+    // Caller-supplied expected commit over the four per-tx VK hashes.
+    // We recompute and assert equality so the value is bound by circuit logic,
+    // not just carried as an opaque witness.
+    per_tx_vk_hashes_commit: Field,
 ) -> return_data BatchOutput {
     // 0. Boundary sanity.
     assert(
@@ -294,6 +299,21 @@ fn main(
         "private logs batch hash mismatch",
     );
 
+    // 6. Per-tx VK hashes commit.
+    //    Binds the four private VK hashes verified above into a single value
+    //    that propagates through the pipeline to the contract, which pins it
+    //    at deployment. Prevents custom-circuit substitution in any tx slot.
+    let computed_commit = compute_per_tx_vk_hashes_commit(
+        deposit_vk_hash,
+        payment_vk_hash,
+        withdraw_vk_hash,
+        padding_vk_hash,
+    );
+    assert(
+        computed_commit == per_tx_vk_hashes_commit,
+        "per-tx VK hashes commit mismatch",
+    );
+
     BatchOutput {
         old_state_root,
         new_state_root,
@@ -304,5 +324,6 @@ fn main(
         private_logs_hash,
         nullifier_tree_start_index: nullifier_tree_start_index,
         note_hash_tree_start_index: note_hash_tree_start_index,
+        per_tx_vk_hashes_commit,
     }
 }

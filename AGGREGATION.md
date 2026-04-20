@@ -55,7 +55,7 @@ Both B and C produce the same submission shape at batch=16. `submit_batch_16` / 
 | Merged private logs (note-discovery) | 512 | 16,384 |
 | **Total L1 DA** | **612** | **19,584** |
 
-One `settle_batch_{16,merged}` public call, nonce += 1. Proof size (16,000 B) and VK size (3,680 B) still matter for kernel proving cost but do not consume L1 DA. Encrypted note logs introduced in Phase 2 (see `DESIGN_DECISIONS.md` §2 extension + `tests/messages/`) dominate the L1 footprint at ~84 %.
+One `settle_batch_{16,merged}` public call, nonce += 1. Proof size (16,000 B) and VK size (3,680 B) still matter for kernel proving cost but do not consume L1 DA. Encrypted note logs introduced in Phase 2 (see `DESIGN_DECISIONS.md` §2 extension + `tests/messages/`) dominate the L1 footprint at ~84 % **under the current delivery assumption that encrypted logs ride alongside the L2 tx**; an alternative note-discovery path (sequencer push, off-chain channel, PIR) would remove the log bytes from this total. Treat the 84 % figure as an upper bound, not a protocol invariant.
 
 ---
 
@@ -81,7 +81,7 @@ One `settle_batch_{16,merged}` public call, nonce += 1. Proof size (16,000 B) an
 
 - **Uniform UltraHonk everywhere.** No Chonk, no IPA, no curve-cycle arithmetic. Circuits are simpler and gate counts predictable.
 - **Aggregator is cheap.** `wrapper_16` gate count is dominated by two `verify_honk_proof` calls — native KZG pairing, no foreign field.
-- **No ECCVM-imposed batch cap.** `batch_app_standalone` compiles linearly to at least batch=128 (see `DESIGN_DECISIONS.md` §3). Current batch=8 is a memory choice, not a protocol limit.
+- **No ECCVM-imposed batch cap.** `batch_app_standalone` compiles linearly to at least batch=128 (see `DESIGN_DECISIONS.md` §3). Current batch=8 is a memory choice, not a protocol limit. At the aggregated *settle* level, the ceiling past batch≈128 is **per-L2-tx public mana** on the O(N) `settle_batch_*` loops, not L1 DA — see `SCALING.md`.
 
 Path C's comparative advantage is leaf proving cost (IVC folding vs full recursive recursion). That matters at larger *N*; see `SCALING.md`.
 

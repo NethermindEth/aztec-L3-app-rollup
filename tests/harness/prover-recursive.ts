@@ -21,10 +21,30 @@ import {
   provePayment,
   proveWithdraw,
   provePadding,
+  getCanonicalPerTxVks,
   type TxProofResult,
   type BatchArtifact,
 } from "./prover.js";
 import { UH_PROOF_FIELDS as PROOF_FIELDS, UH_VK_FIELDS as VK_FIELDS } from "./recursive-shapes.js";
+
+// Zero-logs placeholders for the harness (Phase 2 note-discovery; harness
+// doesn't emit real logs, tests/messages/ covers the encryption path).
+const TX_LOG_PAYLOAD_LEN = 32;
+const BATCH_LOGS_FLAT_LEN = 256;          // 8 tx * 32 fields
+const BATCH_16_LOGS_FLAT_LEN = 512;
+const BATCH_32_LOGS_FLAT_LEN = 1024;
+const TX_ZERO_LOGS: string[] = new Array(TX_LOG_PAYLOAD_LEN).fill("0");
+const BATCH_ZERO_LOGS: string[] = new Array(BATCH_LOGS_FLAT_LEN).fill("0");
+const BATCH_16_ZERO_LOGS: string[] = new Array(BATCH_16_LOGS_FLAT_LEN).fill("0");
+const BATCH_32_ZERO_LOGS: string[] = new Array(BATCH_32_LOGS_FLAT_LEN).fill("0");
+
+let cachedBatchLogsHash: Fr | null = null;
+async function batchLogsHashFr(): Promise<Fr> {
+  if (!cachedBatchLogsHash) {
+    cachedBatchLogsHash = await poseidon2Hash(BATCH_ZERO_LOGS.map((s) => new Fr(BigInt(s))));
+  }
+  return cachedBatchLogsHash;
+}
 
 const TARGET_DIR = resolve(import.meta.dirname ?? ".", "../../target");
 // Recursive pipeline batch sizes. Must match circuits/batch_app_standalone/src/main.nr
@@ -174,22 +194,38 @@ export async function buildBatchProofRecursive(
   const batchAppCircuit = loadCircuit("batch_app_standalone");
   const batchNoir = new Noir(batchAppCircuit);
 
-  const depositVkBytes = deposits.length > 0 ? deposits[0].vk : paddingProof.vk;
-  const paymentVkBytes = payments.length > 0 ? payments[0].vk : paddingProof.vk;
-  const withdrawVkBytes = withdrawals.length > 0 ? withdrawals[0].vk : paddingProof.vk;
-  const paddVkBytes = paddingProof.vk;
+  // Canonical per-tx VKs (see prover.ts::getCanonicalPerTxVks). Using the
+  // SAME VKs regardless of which sections are populated keeps batch_app's
+  // per_tx_vk_hashes_commit output equal to the contract-pinned value.
+  const canonVks = await getCanonicalPerTxVks(api);
+  const depositVkBytes = canonVks.deposit;
+  const paymentVkBytes = canonVks.payment;
+  const withdrawVkBytes = canonVks.withdraw;
+  const paddVkBytes = canonVks.padding;
 
   const vkHashStr = async (vk: Uint8Array) => f2s(await p2h(vkToFields(vk)));
 
+  const depositVkHash = await vkHashStr(depositVkBytes);
+  const paymentVkHash = await vkHashStr(paymentVkBytes);
+  const withdrawVkHash = await vkHashStr(withdrawVkBytes);
+  const paddingVkHash = await vkHashStr(paddVkBytes);
+  const perTxVkHashesCommit = f2s(await p2h([
+    new Fr(BigInt(depositVkHash)),
+    new Fr(BigInt(paymentVkHash)),
+    new Fr(BigInt(withdrawVkHash)),
+    new Fr(BigInt(paddingVkHash)),
+  ]));
+  const privateLogsHashStr = f2s(await batchLogsHashFr());
+
   const { witness: batchWitness } = await batchNoir.execute({
     deposit_vk: bytesToFieldStrings(depositVkBytes, VK_FIELDS),
-    deposit_vk_hash: await vkHashStr(depositVkBytes),
+    deposit_vk_hash: depositVkHash,
     payment_vk: bytesToFieldStrings(paymentVkBytes, VK_FIELDS),
-    payment_vk_hash: await vkHashStr(paymentVkBytes),
+    payment_vk_hash: paymentVkHash,
     withdraw_vk: bytesToFieldStrings(withdrawVkBytes, VK_FIELDS),
-    withdraw_vk_hash: await vkHashStr(withdrawVkBytes),
+    withdraw_vk_hash: withdrawVkHash,
     padding_vk: bytesToFieldStrings(paddVkBytes, VK_FIELDS),
-    padding_vk_hash: await vkHashStr(paddVkBytes),
+    padding_vk_hash: paddingVkHash,
     deposit_count: deposits.length.toString(),
     payment_count: payments.length.toString(),
     withdraw_count: withdrawals.length.toString(),
@@ -204,14 +240,17 @@ export async function buildBatchProofRecursive(
     nullifier_low_leaf_siblings: nullLowLeafSibs,
     nullifier_new_leaf_siblings: nullNewLeafSibs,
     note_hash_insertion_siblings: nhInsertSibs,
+    private_logs: slots.map(() => TX_ZERO_LOGS),
     old_state_root: f2s(oldStateRoot),
     new_state_root: f2s(newStateRoot),
     nullifiers_batch_hash: f2s(settleInputs.nullifiersBatchHash),
     note_hashes_batch_hash: f2s(settleInputs.noteHashesBatchHash),
     deposit_nullifiers_hash: f2s(settleInputs.depositNullifiersHash),
     withdrawal_claims_hash: f2s(settleInputs.withdrawalClaimsHash),
+    private_logs_hash: privateLogsHashStr,
     nullifier_tree_start_index: f2s(nullStartIdx),
     note_hash_tree_start_index: f2s(nhStartIdx),
+    per_tx_vk_hashes_commit: perTxVkHashesCommit,
   });
   console.log("    batch_app_standalone executed");
 
@@ -243,8 +282,10 @@ export async function buildBatchProofRecursive(
     note_hashes_batch_hash: batchAppProofData.publicInputs[3],
     deposit_nullifiers_hash: batchAppProofData.publicInputs[4],
     withdrawal_claims_hash: batchAppProofData.publicInputs[5],
-    nullifier_tree_start_index: batchAppProofData.publicInputs[6],
-    note_hash_tree_start_index: batchAppProofData.publicInputs[7],
+    private_logs_hash: batchAppProofData.publicInputs[6],
+    nullifier_tree_start_index: batchAppProofData.publicInputs[7],
+    note_hash_tree_start_index: batchAppProofData.publicInputs[8],
+    per_tx_vk_hashes_commit: batchAppProofData.publicInputs[9],
   });
   console.log("    wrapper executed");
 
@@ -413,11 +454,13 @@ export async function buildWrapper16Proof(
     note_hashes_a: artifactA.settleInputs.noteHashes.map(f2s),
     deposits_a: artifactA.settleInputs.depositNullifiers.map(f2s),
     withdrawals_a: artifactA.settleInputs.withdrawalClaims.map(f2s),
+    private_logs_a: BATCH_ZERO_LOGS,
 
     nullifiers_b: artifactB.settleInputs.nullifiers.map(f2s),
     note_hashes_b: artifactB.settleInputs.noteHashes.map(f2s),
     deposits_b: artifactB.settleInputs.depositNullifiers.map(f2s),
     withdrawals_b: artifactB.settleInputs.withdrawalClaims.map(f2s),
+    private_logs_b: BATCH_ZERO_LOGS,
 
     old_state_root: f2s(artifactA.oldStateRoot),
     new_state_root: f2s(artifactB.newStateRoot),
@@ -425,12 +468,16 @@ export async function buildWrapper16Proof(
     merged_note_hashes_hash: f2s(mergedNoteHashesHash),
     merged_deposit_nullifiers_hash: f2s(mergedDepositsHash),
     merged_withdrawal_claims_hash: f2s(mergedWithdrawalsHash),
+    merged_private_logs_hash: f2s(await p2h(BATCH_16_ZERO_LOGS.map((s) => new Fr(BigInt(s))))),
     nullifier_tree_start_index: f2s(artifactA.nullifierTreeStartIndex),
     note_hash_tree_start_index: f2s(artifactA.noteHashTreeStartIndex),
-    // New 9th public input: the wrapper VK hash the two inner proofs were
-    // verified under. The contract's submit_batch_16 binds this to its
+    // wrapper_vk_hash binding -- contract's submit_batch_16 binds this to its
     // committed tube_vk_hash (inner-VK substitution hardening).
     out_wrapper_vk_hash: f2s(wrapperVkHash),
+    // per_tx_vk_hashes_commit propagated unchanged from both wrappers'
+    // PI[9]. Both must agree (circuit doesn't enforce here; step script
+    // does pre-check); we just forward A's.
+    out_per_tx_vk_hashes_commit: artifactA.tubePublicInputs[9].toString(),
   });
   console.log("    wrapper_16 executed");
 
@@ -560,11 +607,13 @@ export async function buildWrapper32Proof(
     note_hashes_a: mergedA.mergedNoteHashes.map(f2s),
     deposits_a: mergedA.mergedDeposits.map(f2s),
     withdrawals_a: mergedA.mergedWithdrawals.map(f2s),
+    private_logs_a: BATCH_16_ZERO_LOGS,
 
     nullifiers_b: mergedB.mergedNullifiers.map(f2s),
     note_hashes_b: mergedB.mergedNoteHashes.map(f2s),
     deposits_b: mergedB.mergedDeposits.map(f2s),
     withdrawals_b: mergedB.mergedWithdrawals.map(f2s),
+    private_logs_b: BATCH_16_ZERO_LOGS,
 
     old_state_root: mergedA.mergedPublicInputs[0],
     new_state_root: mergedB.mergedPublicInputs[1],
@@ -572,12 +621,16 @@ export async function buildWrapper32Proof(
     merged_note_hashes_hash: f2s(mergedNoteHashesHash),
     merged_deposit_nullifiers_hash: f2s(mergedDepositsHash),
     merged_withdrawal_claims_hash: f2s(mergedWithdrawalsHash),
-    nullifier_tree_start_index: mergedA.mergedPublicInputs[6],
-    note_hash_tree_start_index: mergedA.mergedPublicInputs[7],
-    // Inner-VK-chain propagation (PI[8] of wrapper_16 is wrapper_vk_hash;
-    // both halves must agree -- circuit enforces, we supply the shared value).
-    out_wrapper_vk_hash: mergedA.mergedPublicInputs[8],
+    merged_private_logs_hash: f2s(await p2h(BATCH_32_ZERO_LOGS.map((s) => new Fr(BigInt(s))))),
+    // wrapper_16 BatchOutput order: [old, new, nulls_h, nh_h, dep_h, wd_h,
+    // logs_h, null_idx, nh_idx, wrapper_vk_hash, per_tx_vk_hashes_commit].
+    nullifier_tree_start_index: mergedA.mergedPublicInputs[7],
+    note_hash_tree_start_index: mergedA.mergedPublicInputs[8],
+    // PI[9] wrapper_vk_hash propagation + our own w16_vk_hash. Both halves
+    // must agree on PI[9] / PI[10]; circuit enforces.
+    out_wrapper_vk_hash: mergedA.mergedPublicInputs[9],
     out_w16_vk_hash: f2s(w16VkHash),
+    out_per_tx_vk_hashes_commit: mergedA.mergedPublicInputs[10],
   });
   console.log("    wrapper_32 executed");
 
@@ -604,8 +657,8 @@ export async function buildWrapper32Proof(
     mergedWithdrawals,
     oldStateRoot: new Fr(BigInt(mergedA.mergedPublicInputs[0])),
     newStateRoot: new Fr(BigInt(mergedB.mergedPublicInputs[1])),
-    nullifierTreeStartIndex: new Fr(BigInt(mergedA.mergedPublicInputs[6])),
-    noteHashTreeStartIndex: new Fr(BigInt(mergedA.mergedPublicInputs[7])),
+    nullifierTreeStartIndex: new Fr(BigInt(mergedA.mergedPublicInputs[7])),
+    noteHashTreeStartIndex: new Fr(BigInt(mergedA.mergedPublicInputs[8])),
   };
 }
 
@@ -670,11 +723,13 @@ export async function buildWrapper64Proof(
     note_hashes_a: ppA.mergedNoteHashes.map(f2s),
     deposits_a: ppA.mergedDeposits.map(f2s),
     withdrawals_a: ppA.mergedWithdrawals.map(f2s),
+    private_logs_a: BATCH_32_ZERO_LOGS,
 
     nullifiers_b: ppB.mergedNullifiers.map(f2s),
     note_hashes_b: ppB.mergedNoteHashes.map(f2s),
     deposits_b: ppB.mergedDeposits.map(f2s),
     withdrawals_b: ppB.mergedWithdrawals.map(f2s),
+    private_logs_b: BATCH_32_ZERO_LOGS,
 
     old_state_root: ppA.mergedPublicInputs[0],
     new_state_root: ppB.mergedPublicInputs[1],
@@ -682,14 +737,17 @@ export async function buildWrapper64Proof(
     merged_note_hashes_hash: f2s(mergedNoteHashesHash),
     merged_deposit_nullifiers_hash: f2s(mergedDepositsHash),
     merged_withdrawal_claims_hash: f2s(mergedWithdrawalsHash),
-    nullifier_tree_start_index: ppA.mergedPublicInputs[6],
-    note_hash_tree_start_index: ppA.mergedPublicInputs[7],
-    // Full inner-VK-chain propagation: wrapper_32's PI[8]/PI[9] are
-    // wrapper_vk_hash / pair_vk_hash. Both halves must agree (circuit
-    // enforces); we propagate both plus our own pp_vk_hash as PI[10].
-    out_wrapper_vk_hash: ppA.mergedPublicInputs[8],
-    out_w16_vk_hash: ppA.mergedPublicInputs[9],
+    merged_private_logs_hash: f2s(await p2h(new Array(2048).fill(0n).map((n) => new Fr(n)))),
+    // wrapper_32 BatchOutput order: tree indices at [7] / [8] post-Phase-2.
+    nullifier_tree_start_index: ppA.mergedPublicInputs[7],
+    note_hash_tree_start_index: ppA.mergedPublicInputs[8],
+    // Full inner-VK-chain propagation: wrapper_32's PI[9]/PI[10]/PI[11] are
+    // wrapper_vk_hash / w16_vk_hash / per_tx_vk_hashes_commit. Propagate all
+    // three plus our own w32_vk_hash.
+    out_wrapper_vk_hash: ppA.mergedPublicInputs[9],
+    out_w16_vk_hash: ppA.mergedPublicInputs[10],
     out_w32_vk_hash: f2s(w32VkHash),
+    out_per_tx_vk_hashes_commit: ppA.mergedPublicInputs[11],
   });
   console.log("    wrapper_64 executed");
 

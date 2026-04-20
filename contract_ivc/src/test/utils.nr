@@ -49,8 +49,9 @@ impl TestL3 {
         // Mint public supply.
         env.call_public(admin, Token::at(token).mint_to_public(admin, INITIAL_SUPPLY));
 
-        // Deploy L3IvcSettlement (zero genesis root, zero tube VK hash, zero merged VK hash).
-        let l3_init = L3IvcSettlement::interface().constructor(0, 0, 0);
+        // Deploy L3IvcSettlement (zero genesis root, zero tube VK hash, zero merged VK hash,
+        // zero per-tx VK hashes commit -- all zero because tests don't exercise verify_honk_proof).
+        let l3_init = L3IvcSettlement::interface().constructor(0, 0, 0, 0);
         let l3 = env.deploy("L3IvcSettlement").with_public_initializer(admin, l3_init);
 
         // Fund L3 contract with tokens for withdrawal payouts.

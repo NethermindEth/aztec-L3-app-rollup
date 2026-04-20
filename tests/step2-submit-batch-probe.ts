@@ -10,6 +10,7 @@
  */
 
 import { Fr } from "@aztec/aztec.js/fields";
+import { poseidon2Hash } from "@aztec/foundation/crypto/poseidon";
 import { createAztecNodeClient, waitForNode } from "@aztec/aztec.js/node";
 import { Contract } from "@aztec/aztec.js/contracts";
 import { loadContractArtifact } from "@aztec/stdlib/abi";
@@ -24,13 +25,15 @@ const L3_ARTIFACT = resolve(
   "../target/l3_ivc_settlement-L3IvcSettlement.json",
 );
 
-// Constants matching the IVC circuit (batch size 8).
+// Constants matching the IVC circuit (batch size 8). Phase 2 widened
+// BATCH_OUTPUT_FIELDS to 10 and added a private_logs flat array.
 const ULTRA_HONK_VK_LENGTH = 115;
 const ULTRA_HONK_PROOF_LENGTH = 500;
-const BATCH_OUTPUT_FIELDS = 8;
+const BATCH_OUTPUT_FIELDS = 10;
 const BATCH_NULLIFIERS_COUNT = 16;
 const BATCH_NOTE_HASHES_COUNT = 16;
 const MAX_BATCH_SIZE = 8;
+const BATCH_LOGS_FLAT_COUNT = 256;
 
 async function main() {
   console.log("Connecting...");
@@ -51,7 +54,7 @@ async function main() {
   const l3Artifact = loadContractArtifact(
     JSON.parse(readFileSync(L3_ARTIFACT, "utf-8")) as NoirCompiledContract,
   );
-  const { contract: l3 } = await Contract.deploy(wallet, l3Artifact, [0n, 0n, 0n], "constructor")
+  const { contract: l3 } = await Contract.deploy(wallet, l3Artifact, [0n, 0n, 0n, 0n], "constructor")
     .send({ from: admin });
   console.log(`L3: ${l3.address}\n`);
 
@@ -63,13 +66,19 @@ async function main() {
   const zeroNoteHashes = new Array(BATCH_NOTE_HASHES_COUNT).fill(0n);
   const zeroDeposits = new Array(MAX_BATCH_SIZE).fill(0n);
   const zeroWithdrawals = new Array(MAX_BATCH_SIZE).fill(0n);
+  const zeroLogs = new Array(BATCH_LOGS_FLAT_COUNT).fill(0n);
+  // Phase 2: public_inputs[6] = poseidon2_hash(private_logs). Without this
+  // the contract rejects at the logs-hash assert BEFORE reaching the proof-
+  // gate no-op that this probe is designed to exercise.
+  const zeroLogsHash = await poseidon2Hash(zeroLogs.map((v) => new Fr(v)));
+  zeroPublicInputs[6] = zeroLogsHash.toBigInt();
 
   // --- Probe 1: All zeros ---
   console.log("=== Probe 1: submit_batch with all-zero proof ===");
   try {
     await l3.methods.submit_batch(
       zeroVk, zeroProof, zeroPublicInputs, 0n,
-      zeroNullifiers, zeroNoteHashes, zeroDeposits, zeroWithdrawals,
+      zeroNullifiers, zeroNoteHashes, zeroDeposits, zeroWithdrawals, zeroLogs,
     ).send({ from: admin });
     console.log("  RESULT: succeeded (sandbox does NOT verify proofs)\n");
   } catch (e: any) {
@@ -84,7 +93,7 @@ async function main() {
   try {
     await l3.methods.submit_batch(
       zeroVk, corruptProof, zeroPublicInputs, 0n,
-      zeroNullifiers, zeroNoteHashes, zeroDeposits, zeroWithdrawals,
+      zeroNullifiers, zeroNoteHashes, zeroDeposits, zeroWithdrawals, zeroLogs,
     ).send({ from: admin });
     console.log("  RESULT: succeeded\n");
   } catch (e: any) {
@@ -97,7 +106,7 @@ async function main() {
   try {
     await l3.methods.submit_batch(
       zeroVk, zeroProof, zeroPublicInputs, 1n, // vk_hash = 1 instead of 0
-      zeroNullifiers, zeroNoteHashes, zeroDeposits, zeroWithdrawals,
+      zeroNullifiers, zeroNoteHashes, zeroDeposits, zeroWithdrawals, zeroLogs,
     ).send({ from: admin });
     console.log("  RESULT: succeeded\n");
   } catch (e: any) {
@@ -116,7 +125,7 @@ async function main() {
     try {
       await l3.methods.submit_batch(
         zeroVk, proofArr, zeroPublicInputs, 0n,
-        zeroNullifiers, zeroNoteHashes, zeroDeposits, zeroWithdrawals,
+        zeroNullifiers, zeroNoteHashes, zeroDeposits, zeroWithdrawals, zeroLogs,
       ).send({ from: admin });
       console.log(`  proof[${len}]: ACCEPTED`);
     } catch (e: any) {

@@ -31,6 +31,7 @@ import {
   proveDeposit,
   buildBatchProof,
   computeTubeVkHash,
+  computePerTxVkHashesCommit,
   type BatchArtifact,
 } from "./harness/prover.js";
 
@@ -106,6 +107,7 @@ async function main() {
   console.log("Computing tube VK hash...");
   const tStart = performance.now();
   const { vkHash: tubeVkHash } = await computeTubeVkHash(api);
+  const perTxVkHashesCommit = await computePerTxVkHashesCommit(api);
   console.log(`  VK hash: ${tubeVkHash.toString().slice(0, 18)}... (${fmt(performance.now() - tStart)})\n`);
 
   // --- Accounts ---
@@ -131,7 +133,7 @@ async function main() {
   );
   const { contract: l3 } = await Contract.deploy(
     wallet, l3Artifact,
-    [initialStateRoot.toBigInt(), tubeVkHash.toBigInt(), 0n],
+    [initialStateRoot.toBigInt(), tubeVkHash.toBigInt(), 0n, perTxVkHashesCommit.toBigInt()],
     "constructor",
   ).send({ from: admin });
 

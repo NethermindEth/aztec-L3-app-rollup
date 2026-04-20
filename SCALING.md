@@ -18,20 +18,20 @@ batch=64  : wrapper_64              (verifies 2 wrapper_32 proofs)
 batch=128 : wrapper_128 (not built) (verifies 2 wrapper_64 proofs)
 ```
 
-The 64-slot path is exercised by `step11-recursive-64slot.ts` and bb-verified end-to-end by `npm run verify:recursive:64` (see `VALIDATION_64_SLOT.md`). 128-slot would need one more aggregator circuit; no protocol limit prevents it.
+The 64-slot path is exercised by `step11-recursive-64slot.ts` and bb-verified end-to-end by `npm run verify:recursive:64` (see `VALIDATION_64_SLOT.md`). 128-slot would need one more aggregator circuit; no protocol limit prevents it. The real ceiling past ~128 slots is **per-L2-tx public mana** on the single `settle_batch_*` call, not L1 DA — the public function's deposit-consume and withdrawal-register loops are O(N), and a batch-N settle call at N≥128 approaches typical per-tx mana ceilings. DA scales gracefully (see table below); public-execution cost is what binds.
 
 ## Public-input widening
 
-Each aggregator level publishes the VK hash of the level below, so the `submit_batch_*` asserts can bind the whole chain. This adds one public-input field per level. The 9-field `BatchOutput` (Phase 2, incl. `private_logs_hash`) is the common prefix:
+Each aggregator level publishes the VK hash of the level below, so the `submit_batch_*` asserts can bind the whole chain. This adds one public-input field per level. In addition, every level carries one `per_tx_vk_hashes_commit` field — a `poseidon2` over the four per-tx VK hashes (`deposit`/`payment`/`withdraw`/`padding`) emitted by `batch_app_standalone` and propagated unchanged up the tree. The 10-field `BatchOutput` (incl. `private_logs_hash` and `per_tx_vk_hashes_commit`) is the common prefix:
 
 | Level | Public inputs | Added |
 |---|---|---|
-| `wrapper` (8) | 9 | — (full BatchOutput) |
-| `wrapper_16` | 10 | `wrapper_vk_hash` |
-| `wrapper_32` | 11 | + `w16_vk_hash` |
-| `wrapper_64` | 12 | + `w32_vk_hash` |
+| `wrapper` (8) | 10 | — (full BatchOutput incl. `per_tx_vk_hashes_commit`) |
+| `wrapper_16` | 11 | `wrapper_vk_hash` |
+| `wrapper_32` | 12 | + `w16_vk_hash` |
+| `wrapper_64` | 13 | + `w32_vk_hash` |
 
-Immutable contract storage holds `tube_vk_hash`, `vk_hash_16`, `vk_hash_32`, `vk_hash_64`; `submit_batch_16` / `submit_batch_64` assert each inner hash against the corresponding storage slot. The hardening closes the inner-VK substitution attack class conditional on the proof gate being enforced; the asserts themselves fire under sandbox/TXE since they are plain Noir asserts.
+Immutable contract storage holds `tube_vk_hash`, `vk_hash_16`, `vk_hash_32`, `vk_hash_64`, and `per_tx_vk_hashes_commit`; `submit_batch` / `submit_batch_16` / `submit_batch_64` assert each against the corresponding storage slot. This closes both the aggregator-level and per-tx VK substitution attack classes conditional on the proof gate being enforced; the asserts themselves fire under sandbox/TXE since they are plain Noir asserts.
 
 ## L1 DA per settlement
 
@@ -46,6 +46,8 @@ Only 8/16/64 slot sizes are real L1 settle endpoints (`submit_batch`, `submit_ba
 | 64-slot | 2 | 64 + 64 = 128 | 2 | 128 + 128 = 256 | 2,048 | **2,436** | 77,952 |
 
 `private_logs` dominates DA at every level (~83 %+ of the total). The flat `[tag, ct_0..ct_14]` layout per output (16 fields each, 2 outputs per tx, batch-sized) is the Aztec-format encrypted-note-log payload that the recipient wallet decrypts (see `tests/messages/`).
+
+**Caveat on the log-dominance claim.** This is the DA cost *if* encrypted logs ride alongside the L2 settle_batch tx — i.e. if L3 note delivery goes through the same broadcast channel Aztec uses at L2. The discovery design isn't fully specified yet (the `tests/messages/` module is a prototype — see the note-discovery review in `DESIGN_DECISIONS.md`), and alternative delivery paths (off-chain sequencer push, dedicated DA layer, PIR) would remove the log bytes from the numbers above and re-open the per-L3-tx DA win. Treat the 83 % figure as an upper bound for the current delivery assumption, not a protocol invariant.
 
 The settle-level `deposit_nullifiers` + `withdrawal_claims` pair could be collapsed into one `[Field; MAX_BATCH_SIZE]` array plus two section counts, saving MAX_BATCH_SIZE − 2 fields per settlement (62 fields / ~2 KB at 64-slot). Not pursued: the savings are negligible next to the log budget, and the two-array split matches `batch_app`'s internal section routing.
 
